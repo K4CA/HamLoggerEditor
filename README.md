@@ -35,6 +35,7 @@ A .NET 8 Windows Forms editor for ADIF (`.adi`) logs.
    ```text
    dotnet run --project HamLoggerEditor.csproj
    ```
+## Code contributor: CLAUDE CODE - OPUS 5
 
 ## Project layout
 

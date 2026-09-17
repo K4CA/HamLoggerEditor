@@ -1,0 +1,16 @@
+C:\Users\davet\source\repos\HamLoggerEditor\bin\Release\net8.0-windows\HamLoggerEditor.exe
+C:\Users\davet\source\repos\HamLoggerEditor\bin\Release\net8.0-windows\HamLoggerEditor.deps.json
+C:\Users\davet\source\repos\HamLoggerEditor\bin\Release\net8.0-windows\HamLoggerEditor.runtimeconfig.json
+C:\Users\davet\source\repos\HamLoggerEditor\bin\Release\net8.0-windows\HamLoggerEditor.dll
+C:\Users\davet\source\repos\HamLoggerEditor\bin\Release\net8.0-windows\HamLoggerEditor.pdb
+C:\Users\davet\source\repos\HamLoggerEditor\obj\Release\net8.0-windows\HamLoggerEditor.GeneratedMSBuildEditorConfig.editorconfig
+C:\Users\davet\source\repos\HamLoggerEditor\obj\Release\net8.0-windows\HamLoggerEditor.AssemblyInfoInputs.cache
+C:\Users\davet\source\repos\HamLoggerEditor\obj\Release\net8.0-windows\HamLoggerEditor.AssemblyInfo.cs
+C:\Users\davet\source\repos\HamLoggerEditor\obj\Release\net8.0-windows\HamLoggerEditor.csproj.CoreCompileInputs.cache
+C:\Users\davet\source\repos\HamLoggerEditor\obj\Release\net8.0-windows\HamLoggerEditor.dll
+C:\Users\davet\source\repos\HamLoggerEditor\obj\Release\net8.0-windows\refint\HamLoggerEditor.dll
+C:\Users\davet\source\repos\HamLoggerEditor\obj\Release\net8.0-windows\HamLoggerEditor.pdb
+C:\Users\davet\source\repos\HamLoggerEditor\obj\Release\net8.0-windows\HamLoggerEditor.genruntimeconfig.cache
+C:\Users\davet\source\repos\HamLoggerEditor\obj\Release\net8.0-windows\ref\HamLoggerEditor.dll
+C:\Users\davet\source\repos\HamLoggerEditor\obj\Release\net8.0-windows\HamLogge.0069324C.Up2Date
+C:\Users\davet\source\repos\HamLoggerEditor\obj\Release\net8.0-windows\HamLoggerEditor.sourcelink.json

@@ -1,0 +1,1034 @@
+﻿using System.Data;
+using System.Globalization;
+using HamLoggerEditor.Adif;
+using HamLoggerEditor.Dialogs;
+using HamLoggerEditor.Export;
+
+namespace HamLoggerEditor;
+
+public sealed class MainForm : Form
+{
+    private const string AppTitle = "HamLogger Contact Editor  Version 1.1";
+
+    // Internal (never saved) columns. ADIF field names cannot start with an underscore.
+    private const string SourceColumn = "__SOURCE_FILE";
+    private const string DupColumn = "__DUPGROUP";
+    private const string SortColumn = "__SORTKEY";
+    private const string OriginalNameKey = "AdifOriginalName";
+
+    /// <summary>ADIF mode written for FT4 / FT2 contacts (FT4 and FT2 are submodes of MFSK).</summary>
+    private const string MfskMode = "MFSK";
+
+    private static readonly string[] DefaultFields =
+    [
+        "CALL", "QSO_DATE", "TIME_ON", "BAND", "MODE", "SUBMODE", "FREQ", "RST_SENT", "RST_RCVD",
+        "NAME", "QTH", "GRIDSQUARE", "STATE", "COUNTRY", "COMMENT"
+    ];
+
+    // Fields that are loaded but never shown (the old editor's internal row ID).
+    private static readonly HashSet<string> IgnoredFields = new(StringComparer.OrdinalIgnoreCase) { "APP_HAMLOGGER_ID" };
+
+    private static readonly Color DupColorA = Color.FromArgb(255, 199, 179);
+    private static readonly Color DupColorB = Color.FromArgb(255, 232, 150);
+    private static readonly Color SourceColor = Color.FromArgb(235, 242, 255);
+
+    private readonly BindingSource source = new();
+    private readonly DataGridView grid = new();
+    private readonly ToolStripStatusLabel status = new() { Spring = true, TextAlign = ContentAlignment.MiddleLeft };
+    private readonly ContextMenuStrip headerMenu = new();
+    private readonly ToolStripMenuItem showDupsOnlyItem = new("Show &Duplicates Only");
+    private readonly ToolStripMenuItem removeSourceItem = new("Remove &Source File Column");
+    private SearchReplaceDialog? searchDialog;
+
+    private DataTable table = new();
+    private string? currentPath;
+    private bool dirty;
+    private bool mergedSinceSave;
+    private bool suppressEvents;
+    private DataGridViewColumn? headerMenuColumn;
+
+    public MainForm()
+    {
+        Text = AppTitle;
+        StartPosition = FormStartPosition.CenterScreen;
+        Width = 1450;
+        Height = 750;
+
+        var menu = BuildMenu();
+        var toolBar = BuildToolBar();
+        var statusStrip = new StatusStrip();
+        statusStrip.Items.Add(status);
+        BuildHeaderMenu();
+
+        grid.Dock = DockStyle.Fill;
+        grid.AutoGenerateColumns = false;
+        grid.AllowUserToAddRows = false;
+        grid.AllowUserToDeleteRows = false;
+        grid.AllowUserToOrderColumns = true;   // drag column headers left / right
+        grid.MultiSelect = true;
+        grid.SelectionMode = DataGridViewSelectionMode.FullRowSelect;
+        grid.RowHeadersWidth = 28;
+        grid.EnableHeadersVisualStyles = false;
+        grid.ColumnHeadersDefaultCellStyle.Font = new Font(grid.Font, FontStyle.Bold);
+        grid.DataError += Grid_DataError;
+        grid.CellFormatting += Grid_CellFormatting;
+        grid.ColumnHeaderMouseClick += Grid_ColumnHeaderMouseClick;
+        grid.ColumnDisplayIndexChanged += (_, _) => { if (!suppressEvents) MarkDirty(); };
+        typeof(DataGridView).GetProperty("DoubleBuffered",
+            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)?.SetValue(grid, true);
+
+        Controls.Add(grid);
+        Controls.Add(toolBar);
+        Controls.Add(menu);
+        Controls.Add(statusStrip);
+        MainMenuStrip = menu;
+        FormClosing += MainForm_FormClosing;
+
+        LoadTable(CreateTable(DefaultFields), autoSize: false);
+        UpdateTitle();
+        UpdateStatus("Ready");
+    }
+
+    #region UI construction
+
+    private MenuStrip BuildMenu()
+    {
+        var menu = new MenuStrip();
+
+        var file = new ToolStripMenuItem("&File");
+        file.DropDownItems.Add(Item("&New", Keys.Control | Keys.N, NewFile));
+        file.DropDownItems.Add(Item("&Open ADIF...", Keys.Control | Keys.O, OpenFile));
+        file.DropDownItems.Add(Item("&Merge ADIF File...", Keys.Control | Keys.M, MergeFile));
+        file.DropDownItems.Add(new ToolStripSeparator());
+        file.DropDownItems.Add(Item("&Save", Keys.Control | Keys.S, () => SaveFile(false)));
+        file.DropDownItems.Add(Item("Save &As...", Keys.Control | Keys.Shift | Keys.S, () => SaveFile(true)));
+        file.DropDownItems.Add(Item("Save Se&lected Rows As...", Keys.None, SaveSelectedRows));
+        file.DropDownItems.Add(new ToolStripSeparator());
+        var export = new ToolStripMenuItem("&Export");
+        export.DropDownItems.Add(Item("&CSV File...", Keys.None, ExportCsv));
+        export.DropDownItems.Add(Item("S&QLite INSERT Script...", Keys.None, () => ExportSql(SqlDialect.SQLite)));
+        export.DropDownItems.Add(Item("SQL &Server INSERT Script...", Keys.None, () => ExportSql(SqlDialect.SqlServer)));
+        file.DropDownItems.Add(export);
+        file.DropDownItems.Add(new ToolStripSeparator());
+        file.DropDownItems.Add(Item("E&xit", Keys.None, Close));
+
+        var edit = new ToolStripMenuItem("&Edit");
+        edit.DropDownItems.Add(Item("&Add Contact", Keys.Control | Keys.Insert, AddContact));
+        edit.DropDownItems.Add(Item("&Delete Selected Rows", Keys.None, DeleteSelected));
+        edit.DropDownItems.Add(new ToolStripSeparator());
+        edit.DropDownItems.Add(Item("&Search and Replace...", Keys.Control | Keys.H, ShowSearchReplace));
+        edit.DropDownItems.Add(new ToolStripSeparator());
+        edit.DropDownItems.Add(Item("Find D&uplicate QSOs", Keys.Control | Keys.D, FindDuplicates));
+        showDupsOnlyItem.Click += (_, _) => SetDuplicateFilter(!showDupsOnlyItem.Checked);
+        edit.DropDownItems.Add(showDupsOnlyItem);
+        edit.DropDownItems.Add(Item("&Clear Duplicate Highlights", Keys.None, ClearDuplicates));
+        edit.DropDownItems.Add(new ToolStripSeparator());
+        edit.DropDownItems.Add(Item("TEST-FT&8  (COMMENT → MODE)", Keys.None, () => RunModeTest("FT8", "FT8", null)));
+        edit.DropDownItems.Add(Item("TEST-FT&4  (COMMENT → MFSK / FT4)", Keys.None, () => RunModeTest("FT4", MfskMode, "FT4")));
+        edit.DropDownItems.Add(Item("TEST-FT&2  (COMMENT → MFSK / FT2)", Keys.None, () => RunModeTest("FT2", MfskMode, "FT2")));
+
+        var view = new ToolStripMenuItem("&View");
+        view.DropDownItems.Add(Item("Sort by Date/Time &Ascending", Keys.None, () => SortByDateTime(true)));
+        view.DropDownItems.Add(Item("Sort by Date/Time &Descending", Keys.None, () => SortByDateTime(false)));
+        view.DropDownItems.Add(Item("&Remove Sort", Keys.None, RemoveSort));
+        view.DropDownItems.Add(new ToolStripSeparator());
+        view.DropDownItems.Add(Item("Auto-size &Columns", Keys.None, AutoSizeColumns));
+
+        var columns = new ToolStripMenuItem("&Columns");
+        columns.DropDownItems.Add(Item("&Manage Columns (reorder / rename / delete)...", Keys.None, ManageColumns));
+        removeSourceItem.Click += (_, _) => RemoveSourceColumn();
+        columns.DropDownItems.Add(removeSourceItem);
+        columns.DropDownItems.Add(new ToolStripSeparator());
+        columns.DropDownItems.Add(new ToolStripMenuItem("Tip: right-click a column header to rename, delete or move it; drag headers to reorder.") { Enabled = false });
+        columns.DropDownOpening += (_, _) => removeSourceItem.Enabled = table.Columns.Contains(SourceColumn);
+
+        menu.Items.AddRange(new ToolStripItem[] { file, edit, view, columns });
+        return menu;
+    }
+
+    private ToolStrip BuildToolBar()
+    {
+        var bar = new ToolStrip { GripStyle = ToolStripGripStyle.Hidden, Dock = DockStyle.Top };
+        bar.Items.Add(Button("Open ADIF", "Open an ADIF file; its field names become the columns", OpenFile));
+        bar.Items.Add(Button("Merge File", "Add the rows of another ADIF file (tagged with its file name)", MergeFile));
+        bar.Items.Add(Button("Save ADIF", "Save all rows", () => SaveFile(false)));
+        bar.Items.Add(Button("Save Selected", "Save only the selected rows to a new ADIF file", SaveSelectedRows));
+        bar.Items.Add(new ToolStripSeparator());
+        bar.Items.Add(Button("Add Contact", "Add a new row", AddContact));
+        bar.Items.Add(Button("Delete Selected", "Delete the selected rows", DeleteSelected));
+        bar.Items.Add(Button("Search/Replace", "Search and replace (Ctrl+H)", ShowSearchReplace));
+        bar.Items.Add(new ToolStripSeparator());
+        bar.Items.Add(Button("Date/Time ▲", "Sort by QSO_DATE + TIME_ON, oldest first", () => SortByDateTime(true)));
+        bar.Items.Add(Button("Date/Time ▼", "Sort by QSO_DATE + TIME_ON, newest first", () => SortByDateTime(false)));
+        bar.Items.Add(Button("Columns...", "Reorder, rename or delete columns", ManageColumns));
+        bar.Items.Add(new ToolStripSeparator());
+        bar.Items.Add(Button("Find Duplicates", "Highlight rows with the same QSO_DATE, TIME_ON, BAND, MODE and CALL", FindDuplicates));
+        bar.Items.Add(new ToolStripSeparator());
+        bar.Items.Add(Button("TEST-FT8", "Rows whose COMMENT contains FT8: MODE = FT8", () => RunModeTest("FT8", "FT8", null)));
+        bar.Items.Add(Button("TEST-FT4", "Rows whose COMMENT contains FT4: MODE = MFSK, SUBMODE = FT4", () => RunModeTest("FT4", MfskMode, "FT4")));
+        bar.Items.Add(Button("TEST-FT2", "Rows whose COMMENT contains FT2: MODE = MFSK, SUBMODE = FT2", () => RunModeTest("FT2", MfskMode, "FT2")));
+        bar.Items.Add(new ToolStripSeparator());
+        bar.Items.Add(Button("Export CSV", "Export all rows to a CSV file", ExportCsv));
+        bar.Items.Add(Button("SQLite Script", "Create a SQLite INSERT script", () => ExportSql(SqlDialect.SQLite)));
+        bar.Items.Add(Button("SQL Server Script", "Create a SQL Server INSERT script", () => ExportSql(SqlDialect.SqlServer)));
+        return bar;
+    }
+
+    private void BuildHeaderMenu()
+    {
+        var rename = new ToolStripMenuItem("&Rename Column...", null, (_, _) => RenameColumn(headerMenuColumn));
+        var delete = new ToolStripMenuItem("&Delete Column", null, (_, _) => DeleteColumn(headerMenuColumn));
+        var left = new ToolStripMenuItem("Move &Left", null, (_, _) => MoveColumn(headerMenuColumn, -1));
+        var right = new ToolStripMenuItem("Move Righ&t", null, (_, _) => MoveColumn(headerMenuColumn, +1));
+        headerMenu.Items.AddRange(new ToolStripItem[]
+        {
+            rename, delete, new ToolStripSeparator(), left, right,
+            new ToolStripSeparator(), new ToolStripMenuItem("&Manage Columns...", null, (_, _) => ManageColumns())
+        });
+        headerMenu.Opening += (_, _) =>
+        {
+            bool isSource = headerMenuColumn?.DataPropertyName == SourceColumn;
+            rename.Enabled = headerMenuColumn is not null && !isSource;
+            delete.Text = isSource ? "Remove &Source File Column" : $"&Delete Column {headerMenuColumn?.HeaderText}";
+        };
+    }
+
+    private static ToolStripMenuItem Item(string text, Keys keys, Action action)
+    {
+        var item = new ToolStripMenuItem(text, null, (_, _) => action());
+        if (keys != Keys.None) item.ShortcutKeys = keys;
+        return item;
+    }
+
+    private static ToolStripButton Button(string text, string tip, Action action) =>
+        new(text, null, (_, _) => action()) { DisplayStyle = ToolStripItemDisplayStyle.Text, ToolTipText = tip };
+
+    #endregion
+
+    #region Table and grid plumbing
+
+    private static bool IsInternal(string columnName) => columnName.StartsWith("__", StringComparison.Ordinal);
+
+    private static DataTable CreateTable(IEnumerable<string> fieldNames)
+    {
+        var t = new DataTable("Contacts") { CaseSensitive = false };
+        t.Columns.Add(new DataColumn(DupColumn, typeof(int)) { DefaultValue = 0 });
+        t.Columns.Add(new DataColumn(SortColumn, typeof(string)));
+        foreach (string field in fieldNames)
+        {
+            if (IgnoredFields.Contains(field) || t.Columns.Contains(field)) continue;
+            AddDataColumn(t, field);
+        }
+        return t;
+    }
+
+    private static DataColumn AddDataColumn(DataTable t, string name)
+    {
+        var column = new DataColumn(name.ToUpperInvariant(), typeof(string));
+        column.ExtendedProperties[OriginalNameKey] = name.ToUpperInvariant();
+        t.Columns.Add(column);
+        return column;
+    }
+
+    private IEnumerable<DataColumn> FieldColumns() =>
+        table.Columns.Cast<DataColumn>().Where(c => !IsInternal(c.ColumnName));
+
+    /// <summary>Finds a field column by its current name, or by the ADIF name it was loaded with (if renamed).</summary>
+    private DataColumn? FindColumn(string adifName)
+    {
+        var columns = FieldColumns().ToList();
+        return columns.FirstOrDefault(c => c.ColumnName.Equals(adifName, StringComparison.OrdinalIgnoreCase))
+            ?? columns.FirstOrDefault(c => adifName.Equals(c.ExtendedProperties[OriginalNameKey] as string, StringComparison.OrdinalIgnoreCase));
+    }
+
+    private List<DataGridViewColumn> OrderedGridColumns() =>
+        grid.Columns.Cast<DataGridViewColumn>().OrderBy(c => c.DisplayIndex).ToList();
+
+    /// <summary>The ADIF field columns (not the temporary Source File column) in on-screen order.</summary>
+    private List<ColumnSpec> CurrentLayout() =>
+        OrderedGridColumns()
+            .Where(c => c.DataPropertyName != SourceColumn)
+            .Select(c => new ColumnSpec(c.DataPropertyName, c.DataPropertyName, c.Width))
+            .ToList();
+
+    private void LoadTable(DataTable newTable, bool autoSize)
+    {
+        table.ColumnChanged -= Table_ColumnChanged;
+        table = newTable;
+        table.ColumnChanged += Table_ColumnChanged;
+        showDupsOnlyItem.Checked = false;
+        RebuildGrid(FieldColumns().Select(c => new ColumnSpec(c.ColumnName, c.ColumnName, 100)).ToList(), keepSortAndFilter: false);
+        if (autoSize) AutoSizeColumns();
+    }
+
+    /// <summary>
+    /// Applies a column layout: deletes table columns not listed, renames, creates new ones (Key == null),
+    /// and rebuilds the grid columns in the listed order. The Source File column, if present, stays leftmost.
+    /// </summary>
+    private void RebuildGrid(IReadOnlyList<ColumnSpec> layout, bool keepSortAndFilter = true, Action? schemaChange = null)
+    {
+        grid.EndEdit();
+        // Read from the DataView: header-click sorts update it, but not BindingSource.Sort.
+        string sort = keepSortAndFilter ? table.DefaultView.Sort ?? string.Empty : string.Empty;
+        string filter = keepSortAndFilter ? table.DefaultView.RowFilter ?? string.Empty : string.Empty;
+        int sourceWidth = grid.Columns.Contains(SourceColumn) ? grid.Columns[SourceColumn].Width : 160;
+
+        suppressEvents = true;
+        grid.SuspendLayout();
+        try
+        {
+            // Clear any sort/filter the BindingSource remembers: it re-applies them whenever its
+            // DataSource changes, which throws when the new list lacks those columns.
+            TrySet(source.RemoveSort);
+            TrySet(source.RemoveFilter);
+            grid.DataSource = null;
+            grid.Columns.Clear();
+            source.DataSource = null;
+            table.DefaultView.Sort = string.Empty;
+            table.DefaultView.RowFilter = string.Empty;
+            schemaChange?.Invoke(); // runs while nothing is bound, so bulk edits don't repaint the grid
+
+            // 1. Delete columns that are no longer in the layout.
+            var keep = new HashSet<string>(layout.Where(s => s.Key is not null).Select(s => s.Key!), StringComparer.Ordinal);
+            foreach (DataColumn column in FieldColumns().Where(c => !keep.Contains(c.ColumnName)).ToList())
+                table.Columns.Remove(column);
+
+            // 2. Rename in two passes so swaps (A→B, B→A) never collide.
+            var renames = layout.Where(s => s.Key is not null && !s.Key.Equals(s.Name, StringComparison.Ordinal)).ToList();
+            for (int i = 0; i < renames.Count; i++) table.Columns[renames[i].Key!]!.ColumnName = $"__RENAME{i}";
+            for (int i = 0; i < renames.Count; i++) table.Columns[$"__RENAME{i}"]!.ColumnName = renames[i].Name;
+
+            // 3. Create new columns.
+            foreach (ColumnSpec spec in layout.Where(s => s.Key is null))
+                if (!table.Columns.Contains(spec.Name)) AddDataColumn(table, spec.Name);
+
+            source.DataSource = table;
+            // Sort and filter live on the DataView only (never on the BindingSource).
+            TrySet(() => table.DefaultView.Sort = sort);
+            TrySet(() => table.DefaultView.RowFilter = filter);
+            showDupsOnlyItem.Checked = !string.IsNullOrEmpty(table.DefaultView.RowFilter);
+
+            if (table.Columns.Contains(SourceColumn)) AddGridColumn(SourceColumn, sourceWidth);
+            foreach (ColumnSpec spec in layout) AddGridColumn(spec.Name, spec.Width);
+            grid.DataSource = source;
+        }
+        finally
+        {
+            grid.ResumeLayout();
+            suppressEvents = false;
+        }
+    }
+
+    private static void TrySet(Action set)
+    {
+        try { set(); } catch (Exception ex) when (ex is ArgumentException or InvalidOperationException or NotSupportedException or DataException or IndexOutOfRangeException) { }
+    }
+
+    private void AddGridColumn(string columnName, int width)
+    {
+        bool isSource = columnName == SourceColumn;
+        var column = new DataGridViewTextBoxColumn
+        {
+            Name = columnName,
+            DataPropertyName = columnName,
+            HeaderText = isSource ? "Source File" : columnName,
+            Width = Math.Clamp(width, 40, 600),
+            SortMode = DataGridViewColumnSortMode.Automatic,
+            ReadOnly = isSource,
+            ToolTipText = isSource ? "Temporary column: the file each row came from. Not saved to ADIF." : columnName
+        };
+        if (isSource) column.DefaultCellStyle.BackColor = SourceColor;
+        grid.Columns.Add(column);
+    }
+
+    private void AutoSizeColumns()
+    {
+        grid.AutoResizeColumns(DataGridViewAutoSizeColumnsMode.DisplayedCells);
+        foreach (DataGridViewColumn c in grid.Columns)
+            c.Width = Math.Clamp(c.Width, 50, 320);
+    }
+
+    /// <summary>All rows (ignoring any filter) in the current sort order.</summary>
+    private List<DataRow> AllRowsInSortOrder()
+    {
+        var view = new DataView(table) { Sort = table.DefaultView.Sort };
+        return view.Cast<DataRowView>().Select(v => v.Row).ToList();
+    }
+
+    private static List<IReadOnlyList<string?>> RowValues(IEnumerable<DataRow> rows, IReadOnlyList<string> columns) =>
+        rows.Select(r => (IReadOnlyList<string?>)columns.Select(c => r[c] as string).ToList()).ToList();
+
+    private void Table_ColumnChanged(object? sender, DataColumnChangeEventArgs e)
+    {
+        if (!suppressEvents && !IsInternal(e.Column?.ColumnName ?? "__")) MarkDirty();
+    }
+
+    /// <summary>Runs a bulk change without repainting the grid for every cell.</summary>
+    private void Bulk(Action change)
+    {
+        grid.EndEdit();
+        source.RaiseListChangedEvents = false;
+        try { change(); }
+        finally
+        {
+            source.RaiseListChangedEvents = true;
+            source.ResetBindings(false);
+            grid.Invalidate();
+        }
+    }
+
+    private void Grid_CellFormatting(object? sender, DataGridViewCellFormattingEventArgs e)
+    {
+        if (e.RowIndex < 0 || e.CellStyle is null) return;
+        // Read through the BindingSource rather than grid.Rows[i] so rows stay shared (faster for big logs).
+        if (e.RowIndex < source.Count && source[e.RowIndex] is DataRowView drv
+            && drv.Row.RowState != DataRowState.Detached
+            && drv.Row[DupColumn] is int group && group > 0)
+        {
+            e.CellStyle.BackColor = group % 2 == 1 ? DupColorA : DupColorB;
+        }
+    }
+
+    private void Grid_ColumnHeaderMouseClick(object? sender, DataGridViewCellMouseEventArgs e)
+    {
+        if (e.Button != MouseButtons.Right || e.ColumnIndex < 0) return;
+        headerMenuColumn = grid.Columns[e.ColumnIndex];
+        headerMenu.Show(Cursor.Position);
+    }
+
+    private void Grid_DataError(object? sender, DataGridViewDataErrorEventArgs e)
+    {
+        MessageBox.Show(this, e.Exception?.Message ?? "Invalid value.", "Invalid value",
+            MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        e.ThrowException = false;
+    }
+
+    #endregion
+
+    #region File commands
+
+    private void NewFile()
+    {
+        if (!ConfirmDiscard()) return;
+        LoadTable(CreateTable(DefaultFields), autoSize: false);
+        currentPath = null;
+        dirty = mergedSinceSave = false;
+        UpdateTitle();
+        UpdateStatus("New contact list");
+    }
+
+    private void OpenFile()
+    {
+        if (!ConfirmDiscard()) return;
+        using var dialog = new OpenFileDialog
+        {
+            Filter = "ADIF files (*.adi;*.adif)|*.adi;*.adif|All files (*.*)|*.*",
+            Title = "Open ADIF Log"
+        };
+        if (dialog.ShowDialog(this) == DialogResult.OK) OpenPath(dialog.FileName);
+    }
+
+    private void OpenPath(string path)
+    {
+        try
+        {
+            UseWaitCursor = true;
+            AdifLog log = AdifFile.Load(path);
+            // The columns come from the field names used in this (first) file.
+            var fields = log.FieldNames.Where(f => !IgnoredFields.Contains(f)).ToList();
+            DataTable newTable = CreateTable(fields.Count > 0 ? fields : DefaultFields);
+            newTable.BeginLoadData();
+            foreach (AdifRecord record in log.Records) AddRecord(newTable, record, null, null);
+            newTable.EndLoadData();
+
+            LoadTable(newTable, autoSize: true);
+            currentPath = path;
+            dirty = mergedSinceSave = false;
+            UpdateTitle();
+            UpdateStatus($"Loaded {log.Records.Count:N0} contacts with {fields.Count} fields from {Path.GetFileName(currentPath)}");
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(this, ex.Message, "Unable to open ADIF", MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
+        finally
+        {
+            UseWaitCursor = false;
+        }
+    }
+
+    private static void AddRecord(DataTable t, AdifRecord record, IReadOnlyDictionary<string, string>? fieldMap, string? sourceFile)
+    {
+        DataRow row = t.NewRow();
+        foreach (var (name, value) in record.Fields)
+        {
+            string? target = fieldMap is null ? (t.Columns.Contains(name) ? name : null)
+                : fieldMap.TryGetValue(name, out string? mapped) ? mapped : null;
+            if (target is not null && !IsInternal(target)) row[target] = value;
+        }
+        row[DupColumn] = 0;
+        if (sourceFile is not null && t.Columns.Contains(SourceColumn)) row[SourceColumn] = sourceFile;
+        t.Rows.Add(row);
+    }
+
+    private void MergeFile()
+    {
+        using var dialog = new OpenFileDialog
+        {
+            Filter = "ADIF files (*.adi;*.adif)|*.adi;*.adif|All files (*.*)|*.*",
+            Title = "Merge ADIF File"
+        };
+        if (dialog.ShowDialog(this) != DialogResult.OK) return;
+
+        // Nothing loaded yet: this is the first file, so its field names define the columns.
+        if (table.Rows.Count == 0 && !dirty)
+        {
+            OpenPath(dialog.FileName);
+            return;
+        }
+
+        AdifLog log;
+        try { log = AdifFile.Load(dialog.FileName); }
+        catch (Exception ex)
+        {
+            MessageBox.Show(this, ex.Message, "Unable to open ADIF", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            return;
+        }
+        string fileName = Path.GetFileName(dialog.FileName);
+
+        // Match the new file's fields to existing columns (by current name, or by original name if renamed).
+        var fieldMap = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        var unknown = new List<string>();
+        foreach (string field in log.FieldNames.Where(f => !IgnoredFields.Contains(f)))
+        {
+            DataColumn? column = FindColumn(field);
+            if (column is not null) fieldMap[field] = column.ColumnName;
+            else unknown.Add(field);
+        }
+
+        var layout = CurrentLayout();
+        if (unknown.Count > 0)
+        {
+            DialogResult answer = MessageBox.Show(this,
+                $"{fileName} has {unknown.Count} field(s) that are not columns in the grid:\n\n{string.Join(", ", unknown)}\n\n" +
+                "Yes = add them as new columns\nNo = skip those fields\nCancel = don't merge",
+                "Merge ADIF File", MessageBoxButtons.YesNoCancel, MessageBoxIcon.Question);
+            if (answer == DialogResult.Cancel) return;
+            if (answer == DialogResult.Yes)
+            {
+                foreach (string field in unknown)
+                {
+                    string name = field.ToUpperInvariant();
+                    layout.Add(new ColumnSpec(null, name, 100));
+                    fieldMap[field] = name;
+                }
+            }
+        }
+
+        // Add the temporary Source File column and label the rows that were already loaded.
+        RebuildGrid(layout, schemaChange: () =>
+        {
+            if (table.Columns.Contains(SourceColumn)) return;
+            DataColumn column = table.Columns.Add(SourceColumn, typeof(string));
+            string original = currentPath is null ? "(original)" : Path.GetFileName(currentPath);
+            foreach (DataRow row in table.Rows) row[column] = original;
+        });
+
+        Bulk(() =>
+        {
+            suppressEvents = true;
+            try
+            {
+                table.BeginLoadData();
+                foreach (AdifRecord record in log.Records) AddRecord(table, record, fieldMap, fileName);
+                table.EndLoadData();
+            }
+            finally { suppressEvents = false; }
+        });
+
+        mergedSinceSave = true;
+        MarkDirty();
+        UpdateStatus($"Merged {log.Records.Count:N0} contacts from {fileName}");
+    }
+
+    private bool SaveFile(bool saveAs)
+    {
+        grid.EndEdit();
+        source.EndEdit();
+        string? path = currentPath;
+        // After a merge, don't silently overwrite the first file: ask where to save.
+        if (saveAs || mergedSinceSave || string.IsNullOrWhiteSpace(path))
+        {
+            path = AskSavePath(mergedSinceSave && !saveAs ? "Save Merged Log As" : "Save ADIF Log",
+                path is null ? "contacts.adi" : Path.GetFileName(path));
+            if (path is null) return false;
+        }
+        try
+        {
+            var columns = CurrentLayout().Select(c => c.Name).ToList();
+            var rows = AllRowsInSortOrder();
+            AdifFile.Save(path, columns, RowValues(rows, columns));
+            currentPath = path;
+            dirty = mergedSinceSave = false;
+            UpdateTitle();
+            UpdateStatus($"Saved {rows.Count:N0} contacts to {Path.GetFileName(path)}");
+            return true;
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(this, ex.Message, "Unable to save ADIF", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            return false;
+        }
+    }
+
+    private void SaveSelectedRows()
+    {
+        grid.EndEdit();
+        var rows = grid.SelectedRows.Cast<DataGridViewRow>()
+            .OrderBy(r => r.Index)
+            .Select(r => (r.DataBoundItem as DataRowView)?.Row)
+            .OfType<DataRow>().ToList();
+        if (rows.Count == 0)
+        {
+            MessageBox.Show(this, "Select one or more rows first (click the row headers; Ctrl/Shift+click selects several).",
+                "Save Selected Rows", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+        string? path = AskSavePath($"Save {rows.Count:N0} Selected Row(s) As", "selected.adi");
+        if (path is null) return;
+        try
+        {
+            var columns = CurrentLayout().Select(c => c.Name).ToList();
+            AdifFile.Save(path, columns, RowValues(rows, columns));
+            UpdateStatus($"Saved {rows.Count:N0} selected contacts to {Path.GetFileName(path)}");
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(this, ex.Message, "Unable to save ADIF", MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
+    }
+
+    private string? AskSavePath(string title, string defaultName)
+    {
+        using var dialog = new SaveFileDialog
+        {
+            Title = title,
+            Filter = "ADIF files (*.adi)|*.adi|ADIF files (*.adif)|*.adif|All files (*.*)|*.*",
+            DefaultExt = "adi",
+            AddExtension = true,
+            FileName = defaultName
+        };
+        return dialog.ShowDialog(this) == DialogResult.OK ? dialog.FileName : null;
+    }
+
+    private void ExportCsv()
+    {
+        grid.EndEdit();
+        using var dialog = new SaveFileDialog
+        {
+            Title = "Export to CSV",
+            Filter = "CSV files (*.csv)|*.csv|All files (*.*)|*.*",
+            DefaultExt = "csv",
+            AddExtension = true,
+            FileName = Path.GetFileNameWithoutExtension(currentPath ?? "contacts") + ".csv"
+        };
+        if (dialog.ShowDialog(this) != DialogResult.OK) return;
+        try
+        {
+            var (headers, columns) = ExportColumns();
+            var rows = AllRowsInSortOrder();
+            CsvExporter.Save(dialog.FileName, headers, RowValues(rows, columns));
+            UpdateStatus($"Exported {rows.Count:N0} rows to {Path.GetFileName(dialog.FileName)}");
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(this, ex.Message, "Unable to export CSV", MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
+    }
+
+    private void ExportSql(SqlDialect dialect)
+    {
+        grid.EndEdit();
+        string dbName = dialect == SqlDialect.SQLite ? "SQLite" : "SQL Server";
+        string? tableName = PromptDialog.Show(this, $"{dbName} INSERT Script", "Table name:", "Contacts",
+            v => SqlScriptExporter.IsValidIdentifier(v) ? null : "Use letters, digits and underscores only (not starting with a digit).");
+        if (tableName is null) return;
+
+        using var dialog = new SaveFileDialog
+        {
+            Title = $"Save {dbName} INSERT Script",
+            Filter = "SQL scripts (*.sql)|*.sql|All files (*.*)|*.*",
+            DefaultExt = "sql",
+            AddExtension = true,
+            FileName = $"{Path.GetFileNameWithoutExtension(currentPath ?? "contacts")}_{(dialect == SqlDialect.SQLite ? "sqlite" : "sqlserver")}.sql"
+        };
+        if (dialog.ShowDialog(this) != DialogResult.OK) return;
+        try
+        {
+            var (headers, columns) = ExportColumns();
+            var rows = AllRowsInSortOrder();
+            SqlScriptExporter.Save(dialog.FileName, dialect, tableName, headers, RowValues(rows, columns));
+            UpdateStatus($"Wrote {dbName} script for {rows.Count:N0} rows to {Path.GetFileName(dialog.FileName)}");
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(this, ex.Message, $"Unable to create {dbName} script", MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
+    }
+
+    /// <summary>Columns in on-screen order (including Source File, exported as SOURCE_FILE).</summary>
+    private (List<string> Headers, List<string> Columns) ExportColumns()
+    {
+        var columns = OrderedGridColumns().Select(c => c.DataPropertyName).ToList();
+        var headers = columns.Select(c => c == SourceColumn ? "SOURCE_FILE" : c).ToList();
+        return (headers, columns);
+    }
+
+    private bool ConfirmDiscard()
+    {
+        grid.EndEdit();
+        if (!dirty) return true;
+        DialogResult result = MessageBox.Show(this, "Save changes to the contact list first?", AppTitle,
+            MessageBoxButtons.YesNoCancel, MessageBoxIcon.Question);
+        return result switch
+        {
+            DialogResult.Yes => SaveFile(false),
+            DialogResult.No => true,
+            _ => false
+        };
+    }
+
+    private void MainForm_FormClosing(object? sender, FormClosingEventArgs e)
+    {
+        if (!ConfirmDiscard()) e.Cancel = true;
+    }
+
+    #endregion
+
+    #region Row commands
+
+    private void AddContact()
+    {
+        grid.EndEdit();
+        SetDuplicateFilter(false);
+        DateTime utc = DateTime.UtcNow;
+        DataRow row = table.NewRow();
+        row[DupColumn] = 0;
+        if (FindColumn("QSO_DATE") is { } date) row[date] = utc.ToString("yyyyMMdd", CultureInfo.InvariantCulture);
+        if (FindColumn("TIME_ON") is { } time) row[time] = utc.ToString("HHmmss", CultureInfo.InvariantCulture);
+        if (table.Columns.Contains(SourceColumn)) row[SourceColumn] = "(added)";
+        table.Rows.Add(row);
+
+        DataGridViewRow? gridRow = grid.Rows.Cast<DataGridViewRow>()
+            .FirstOrDefault(r => (r.DataBoundItem as DataRowView)?.Row == row);
+        if (gridRow is not null)
+        {
+            DataGridViewColumn? first = (FindColumn("CALL") is { } call ? grid.Columns[call.ColumnName] : null)
+                ?? OrderedGridColumns().FirstOrDefault(c => !c.ReadOnly);
+            grid.ClearSelection();
+            gridRow.Selected = true;
+            if (first is not null)
+            {
+                grid.CurrentCell = gridRow.Cells[first.Index];
+                grid.BeginEdit(true);
+            }
+        }
+        MarkDirty();
+        UpdateStatus("Contact added (QSO_DATE/TIME_ON set to the current UTC time)");
+    }
+
+    private void DeleteSelected()
+    {
+        grid.EndEdit();
+        var selected = grid.SelectedRows.Cast<DataGridViewRow>()
+            .Select(r => (r.DataBoundItem as DataRowView)?.Row).OfType<DataRow>().ToList();
+        if (selected.Count == 0) return;
+        if (MessageBox.Show(this, $"Delete {selected.Count:N0} selected contact(s)?", "Confirm deletion",
+                MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes) return;
+        Bulk(() => { foreach (DataRow row in selected) table.Rows.Remove(row); });
+        MarkDirty();
+        UpdateStatus($"Deleted {selected.Count:N0} contact(s)");
+    }
+
+    private void ShowSearchReplace()
+    {
+        searchDialog ??= new SearchReplaceDialog(grid, UpdateStatus);
+        searchDialog.ShowFor(this, null);
+    }
+
+    private static string NormalizeTime(string? value)
+    {
+        string digits = new((value ?? string.Empty).Where(char.IsAsciiDigit).ToArray());
+        return digits.Length >= 6 ? digits[..6] : digits.PadRight(6, '0');
+    }
+
+    private void SortByDateTime(bool ascending)
+    {
+        DataColumn? date = FindColumn("QSO_DATE");
+        DataColumn? time = FindColumn("TIME_ON");
+        if (date is null || time is null)
+        {
+            MessageBox.Show(this, "Sorting by date/time needs QSO_DATE and TIME_ON columns.", AppTitle,
+                MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+        Bulk(() =>
+        {
+            table.DefaultView.Sort = string.Empty;
+            foreach (DataRow row in table.Rows)
+                row[SortColumn] = ((row[date] as string) ?? string.Empty).Trim() + NormalizeTime(row[time] as string);
+            table.DefaultView.Sort = $"[{SortColumn}] {(ascending ? "ASC" : "DESC")}";
+        });
+        foreach (DataGridViewColumn c in grid.Columns) c.HeaderCell.SortGlyphDirection = SortOrder.None;
+        UpdateStatus($"Sorted by date/time, {(ascending ? "oldest" : "newest")} first");
+    }
+
+    private void RemoveSort()
+    {
+        Bulk(() => table.DefaultView.Sort = string.Empty);
+        foreach (DataGridViewColumn c in grid.Columns) c.HeaderCell.SortGlyphDirection = SortOrder.None;
+        UpdateStatus("Sort removed");
+    }
+
+    private void FindDuplicates()
+    {
+        string[] keyNames = ["QSO_DATE", "TIME_ON", "BAND", "MODE", "CALL"];
+        var keyColumns = keyNames.Select(FindColumn).ToList();
+        var missing = keyNames.Where((_, i) => keyColumns[i] is null).ToList();
+        if (missing.Count > 0)
+        {
+            MessageBox.Show(this, $"Duplicate checking needs these columns: {string.Join(", ", missing)}.", AppTitle,
+                MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+        DataColumn date = keyColumns[0]!, time = keyColumns[1]!, band = keyColumns[2]!, mode = keyColumns[3]!, call = keyColumns[4]!;
+
+        var groups = new Dictionary<string, List<DataRow>>(StringComparer.OrdinalIgnoreCase);
+        foreach (DataRow row in table.Rows)
+        {
+            string d = ((row[date] as string) ?? string.Empty).Trim();
+            string t = ((row[time] as string) ?? string.Empty).Trim();
+            string c = ((row[call] as string) ?? string.Empty).Trim();
+            if (d.Length == 0 || t.Length == 0 || c.Length == 0) continue;
+            string key = string.Join("|", d, NormalizeTime(t),
+                ((row[band] as string) ?? string.Empty).Trim(),
+                ((row[mode] as string) ?? string.Empty).Trim(),
+                c);
+            if (!groups.TryGetValue(key, out var list)) groups[key] = list = [];
+            list.Add(row);
+        }
+
+        var dupGroups = groups.Values.Where(g => g.Count > 1).ToList();
+        int dupRows = dupGroups.Sum(g => g.Count);
+        Bulk(() =>
+        {
+            foreach (DataRow row in table.Rows) row[DupColumn] = 0;
+            int number = 0;
+            foreach (var g in dupGroups)
+            {
+                number++;
+                foreach (DataRow row in g) row[DupColumn] = number;
+            }
+        });
+
+        if (dupRows == 0)
+        {
+            SetDuplicateFilter(false);
+            UpdateStatus("No duplicates found");
+            MessageBox.Show(this, "No duplicate QSOs found (matching QSO_DATE, TIME_ON, BAND, MODE and CALL).", AppTitle,
+                MessageBoxButtons.OK, MessageBoxIcon.Information);  
+            return;
+        }
+
+        UpdateStatus($"Found {dupRows:N0} duplicate rows in {dupGroups.Count:N0} groups (highlighted)");
+        if (MessageBox.Show(this,
+                $"Found {dupRows:N0} rows in {dupGroups.Count:N0} duplicate groups (same QSO_DATE, TIME_ON, BAND, MODE and CALL). " +
+                "They are highlighted; alternating colors separate the groups.\n\n" +
+                "Show only the duplicate rows, sorted by date/time?", "Duplicate QSOs", 
+                MessageBoxButtons.YesNo, MessageBoxIcon.Question) == DialogResult.Yes)
+        {
+            SortByDateTime(true);
+            SetDuplicateFilter(true);
+        }
+    }
+
+    private void SetDuplicateFilter(bool on)
+    {
+        grid.EndEdit();
+        string filter = on ? $"[{DupColumn}] > 0" : string.Empty;
+        if ((table.DefaultView.RowFilter ?? string.Empty) != filter) table.DefaultView.RowFilter = filter;
+        showDupsOnlyItem.Checked = on;
+        UpdateStatus(on ? "Showing duplicate rows only" : "Showing all rows");
+    }
+
+    private void ClearDuplicates()
+    {
+        SetDuplicateFilter(false);
+        Bulk(() => { foreach (DataRow row in table.Rows) row[DupColumn] = 0; });
+        UpdateStatus("Duplicate highlights cleared");
+    }
+
+    /// <summary>
+    /// For every row whose COMMENT contains <paramref name="token"/>, sets MODE (and SUBMODE when given).
+    /// </summary>
+    private void RunModeTest(string token, string mode, string? submode)
+    {
+        string title = $"TEST-{token}";
+        DataColumn? comment = FindColumn("COMMENT") ?? FindColumn("COMMENTS");
+        if (comment is null)
+        {
+            MessageBox.Show(this, "There is no COMMENT column to check.", title, MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+
+        // Create MODE / SUBMODE columns if the log doesn't have them yet.
+        var layout = CurrentLayout();
+        bool changedLayout = false;
+        if (FindColumn("MODE") is null)
+        {
+            layout.Add(new ColumnSpec(null, "MODE", 80));
+            changedLayout = true;
+        }
+        if (submode is not null && FindColumn("SUBMODE") is null)
+        {
+            string modeName = FindColumn("MODE")?.ColumnName ?? "MODE";
+            int at = layout.FindIndex(s => s.Name.Equals(modeName, StringComparison.OrdinalIgnoreCase));
+            layout.Insert(at < 0 ? layout.Count : at + 1, new ColumnSpec(null, "SUBMODE", 80));
+            changedLayout = true;
+        }
+        if (changedLayout) RebuildGrid(layout);
+
+        string modeCol = FindColumn("MODE")!.ColumnName;
+        string? submodeCol = submode is null ? null : FindColumn("SUBMODE")!.ColumnName;
+
+        int matched = 0, updated = 0;
+        Bulk(() =>
+        {
+            foreach (DataRow row in table.Rows)
+            {
+                if (row[comment] is not string text || !text.Contains(token, StringComparison.OrdinalIgnoreCase)) continue;
+                matched++;
+                bool change = !string.Equals(row[modeCol] as string, mode, StringComparison.Ordinal)
+                    || (submodeCol is not null && !string.Equals(row[submodeCol] as string, submode, StringComparison.Ordinal));
+                if (!change) continue;
+                row[modeCol] = mode;
+                if (submodeCol is not null) row[submodeCol] = submode;
+                updated++;
+            }
+        });
+
+        string what = submode is null ? $"MODE = {mode}" : $"MODE = {mode}, SUBMODE = {submode}";
+        UpdateStatus($"{title}: {matched:N0} rows mention {token}; {updated:N0} updated ({what})");
+        MessageBox.Show(this,
+            $"{matched:N0} row(s) have \"{token}\" in {comment.ColumnName}.\n{updated:N0} row(s) were updated to {what}." +
+            (matched > updated ? $"\n{matched - updated:N0} row(s) already had those values." : string.Empty),
+            title, MessageBoxButtons.OK, MessageBoxIcon.Information);
+    }
+
+    #endregion
+
+    #region Column commands
+
+    private void ManageColumns()
+    {
+        using var dialog = new ColumnManagerDialog(CurrentLayout());
+        if (dialog.ShowDialog(this) != DialogResult.OK) return;
+        var before = CurrentLayout();
+        var after = dialog.Columns;
+        bool same = before.Count == after.Count && before.Zip(after).All(p => p.First.Key == p.Second.Key && p.Second.Key == p.Second.Name);
+        if (same) return;
+
+        int deleted = before.Count - after.Count;
+        if (deleted > 0 && table.Rows.Count > 0 && MessageBox.Show(this,
+                $"Delete {deleted} column(s) and their data from all {table.Rows.Count:N0} rows?", "Manage Columns",
+                MessageBoxButtons.OKCancel, MessageBoxIcon.Warning) != DialogResult.OK) return;
+
+        RebuildGrid(after);
+        MarkDirty();
+        UpdateStatus("Columns updated");
+    }
+
+    private void RenameColumn(DataGridViewColumn? column)
+    {
+        if (column is null || column.DataPropertyName == SourceColumn) return;
+        var layout = CurrentLayout();
+        ColumnSpec? spec = layout.FirstOrDefault(s => s.Key == column.DataPropertyName);
+        if (spec is null) return;
+        string? name = PromptDialog.Show(this, "Rename Column", $"New ADIF field name for {spec.Name}:", spec.Name, v =>
+        {
+            if (!AdifFile.IsValidFieldName(v))
+                return "ADIF field names may contain only letters, digits and underscores, and cannot start with an underscore.";
+            return layout.Any(s => s != spec && s.Name.Equals(v, StringComparison.OrdinalIgnoreCase))
+                ? $"A column named {v.ToUpperInvariant()} already exists." : null;
+        });
+        if (name is null || name.Equals(spec.Name, StringComparison.Ordinal)) return;
+        string old = spec.Name;
+        spec.Name = name.ToUpperInvariant();
+        RebuildGrid(layout);
+        MarkDirty();
+        UpdateStatus($"Renamed {old} to {spec.Name} (saved files will use the new name)");
+    }
+
+    private void DeleteColumn(DataGridViewColumn? column)
+    {
+        if (column is null) return;
+        if (column.DataPropertyName == SourceColumn)
+        {
+            RemoveSourceColumn();
+            return;
+        }
+        var layout = CurrentLayout();
+        if (layout.Count <= 1)
+        {
+            MessageBox.Show(this, "At least one column must remain.", AppTitle, MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+        if (MessageBox.Show(this, $"Delete column {column.HeaderText} and its data from all {table.Rows.Count:N0} rows?",
+                "Delete Column", MessageBoxButtons.OKCancel, MessageBoxIcon.Warning) != DialogResult.OK) return;
+        layout.RemoveAll(s => s.Key == column.DataPropertyName);
+        RebuildGrid(layout);
+        MarkDirty();
+        UpdateStatus($"Deleted column {column.HeaderText}");
+    }
+
+    private void MoveColumn(DataGridViewColumn? column, int direction)
+    {
+        if (column is null) return;
+        var ordered = OrderedGridColumns();
+        int index = ordered.IndexOf(column);
+        int target = index + direction;
+        if (index < 0 || target < 0 || target >= ordered.Count) return;
+        column.DisplayIndex = ordered[target].DisplayIndex;
+        MarkDirty();
+    }
+
+    private void RemoveSourceColumn()
+    {
+        if (!table.Columns.Contains(SourceColumn)) return;
+        RebuildGrid(CurrentLayout(), schemaChange: () => table.Columns.Remove(SourceColumn));
+        UpdateStatus("Source File column removed");
+    }
+
+    #endregion
+
+    #region Status
+
+    private void MarkDirty()
+    {
+        if (dirty) return;
+        dirty = true;
+        UpdateTitle();
+    }
+
+    private void UpdateTitle() =>
+        Text = $"{AppTitle} - {(currentPath is null ? "Untitled" : Path.GetFileName(currentPath))}{(dirty ? " *" : string.Empty)}";
+
+    private void UpdateStatus(string message)
+    {
+        string shown = !string.IsNullOrEmpty(table.DefaultView.RowFilter) ? $"  |  Showing: {source.Count:N0}" : string.Empty;
+        status.Text = $"{message}  |  Contacts: {table.Rows.Count:N0}{shown}  |  Columns: {FieldColumns().Count()}";
+        UpdateTitle();
+    }
+
+    #endregion
+}

@@ -1,0 +1,172 @@
+using System.Globalization;
+using System.Text;
+
+namespace HamLoggerEditor.Adif;
+
+/// <summary>One ADIF record: field names (upper case) in the order they appeared, with their values.</summary>
+public sealed class AdifRecord
+{
+    private readonly Dictionary<string, string> values = new(StringComparer.OrdinalIgnoreCase);
+    private readonly List<string> order = [];
+
+    public IReadOnlyList<string> FieldNames => order;
+
+    public int Count => order.Count;
+
+    public string? this[string name]
+    {
+        get => values.TryGetValue(name, out string? v) ? v : null;
+        set
+        {
+            string key = name.ToUpperInvariant();
+            if (value is null)
+            {
+                if (values.Remove(key)) order.RemoveAll(n => n.Equals(key, StringComparison.OrdinalIgnoreCase));
+                return;
+            }
+            if (!values.ContainsKey(key)) order.Add(key);
+            values[key] = value;
+        }
+    }
+
+    public IEnumerable<KeyValuePair<string, string>> Fields => order.Select(n => new KeyValuePair<string, string>(n, values[n]));
+}
+
+/// <summary>The contents of an ADIF (.adi) file.</summary>
+public sealed class AdifLog
+{
+    /// <summary>Every field name used by any record, in order of first appearance.</summary>
+    public List<string> FieldNames { get; } = [];
+
+    public List<AdifRecord> Records { get; } = [];
+}
+
+public static class AdifFile
+{
+    private const string ProgramId = "HamLoggerEditor";
+
+    private static readonly Encoding Latin1 = Encoding.Latin1;
+    private static readonly Encoding StrictUtf8 = new UTF8Encoding(false, true);
+
+    /// <summary>
+    /// Reads an ADI file. Field lengths are treated as UTF-8 byte counts (what this program and most
+    /// loggers write). The reader scans tag by tag, so values containing "&lt;" or "&lt;EOR&gt;" are safe.
+    /// </summary>
+    public static AdifLog Load(string path)
+    {
+        // Latin-1 maps every byte to exactly one char, so string positions equal byte positions.
+        string text = Latin1.GetString(File.ReadAllBytes(path));
+        var log = new AdifLog();
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        int pos = 0;
+        // Per the ADIF spec, a file whose first character is not '<' has a header ending in <EOH>.
+        string start = text.TrimStart('\u00EF', '\u00BB', '\u00BF', ' ', '\t', '\r', '\n'); // UTF-8 BOM bytes + whitespace
+        if (start.Length > 0 && start[0] != '<')
+        {
+            int eoh = text.IndexOf("<EOH>", StringComparison.OrdinalIgnoreCase);
+            if (eoh >= 0) pos = eoh + 5;
+        }
+
+        var current = new AdifRecord();
+        while (pos < text.Length)
+        {
+            int open = text.IndexOf('<', pos);
+            if (open < 0) break;
+            int close = text.IndexOf('>', open + 1);
+            if (close < 0) break;
+
+            string tag = text.Substring(open + 1, close - open - 1);
+            string[] parts = tag.Split(':');
+            string name = parts[0].Trim();
+
+            if (!IsValidFieldName(name))
+            {
+                pos = open + 1; // stray '<' in free text
+                continue;
+            }
+
+            if (name.Equals("EOR", StringComparison.OrdinalIgnoreCase))
+            {
+                if (current.Count > 0)
+                {
+                    log.Records.Add(current);
+                    foreach (string field in current.FieldNames)
+                        if (seen.Add(field)) log.FieldNames.Add(field);
+                }
+                current = new AdifRecord();
+                pos = close + 1;
+                continue;
+            }
+
+            if (name.Equals("EOH", StringComparison.OrdinalIgnoreCase))
+            {
+                current = new AdifRecord(); // anything before <EOH> was header data
+                pos = close + 1;
+                continue;
+            }
+
+            if (parts.Length < 2 || !int.TryParse(parts[1].Trim(), NumberStyles.None, CultureInfo.InvariantCulture, out int length))
+            {
+                pos = close + 1;
+                continue;
+            }
+
+            int valueStart = close + 1;
+            length = Math.Max(0, Math.Min(length, text.Length - valueStart));
+            current[name] = DecodeValue(text.Substring(valueStart, length)).Trim();
+            pos = valueStart + length;
+        }
+
+        // Tolerate a final record that is missing its <EOR>.
+        if (current.Count > 0)
+        {
+            log.Records.Add(current);
+            foreach (string field in current.FieldNames)
+                if (seen.Add(field)) log.FieldNames.Add(field);
+        }
+        return log;
+    }
+
+    /// <summary>Writes records to an ADI file using the field names and order given.</summary>
+    public static void Save(string path, IReadOnlyList<string> fieldNames, IEnumerable<IReadOnlyList<string?>> rows)
+    {
+        using var writer = new StreamWriter(path, false, new UTF8Encoding(false));
+        writer.WriteLine($"Generated by HamLogger Contact Editor on {DateTime.UtcNow:yyyy-MM-dd HH:mm:ss} UTC");
+        WriteField(writer, "ADIF_VER", "3.1.4");
+        WriteField(writer, "PROGRAMID", ProgramId);
+        WriteField(writer, "CREATED_TIMESTAMP", DateTime.UtcNow.ToString("yyyyMMdd HHmmss", CultureInfo.InvariantCulture));
+        writer.WriteLine("<EOH>");
+        writer.WriteLine();
+
+        foreach (IReadOnlyList<string?> row in rows)
+        {
+            for (int i = 0; i < fieldNames.Count && i < row.Count; i++)
+                WriteField(writer, fieldNames[i], row[i]);
+            writer.WriteLine("<EOR>");
+        }
+    }
+
+    /// <summary>ADIF field names: letters, digits and underscores, starting with a letter or digit.</summary>
+    public static bool IsValidFieldName(string name)
+    {
+        if (string.IsNullOrEmpty(name) || name[0] == '_') return false;
+        foreach (char c in name)
+            if (!(char.IsAsciiLetterOrDigit(c) || c == '_')) return false;
+        return true;
+    }
+
+    private static string DecodeValue(string latin1Value)
+    {
+        byte[] bytes = Latin1.GetBytes(latin1Value);
+        try { return StrictUtf8.GetString(bytes); }
+        catch (DecoderFallbackException) { return latin1Value; } // not UTF-8: keep the Latin-1 reading
+    }
+
+    private static void WriteField(TextWriter writer, string name, string? value)
+    {
+        if (string.IsNullOrEmpty(value)) return;
+        int byteCount = Encoding.UTF8.GetByteCount(value);
+        writer.Write($"<{name}:{byteCount}>{value} ");
+    }
+}
