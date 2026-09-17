@@ -1,0 +1,8 @@
+bin/
+obj/
+publish/
+*.mdb
+*.ldb
+*.adi
+*.adif
+*.tmp
