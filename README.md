@@ -49,3 +49,26 @@ A .NET 8 Windows Forms editor for ADIF (`.adi`) logs.
 | `Dialogs/PromptDialog.cs` | Simple text prompt (rename, table name) |
 | `Models/Contact.cs` | The old fixed contact model (no longer used by the editor) |
 # HamLoggerEditor
+
+# Latest Update
+
+Update HamLoggerEditor project to include the following funtionality:
+
+
+ If (Column A) (!=, =, >, <) ( Value1 ) AND / OR
+	(Column B) (!=, =, >, <) ( Value2 ) THEN
+	(Column C) = (Value3)
+	
+	- Where Column A, B and C are dropdowns showing a dynamic list of existion columns contained by the DataGridView.
+	- Value1, Value2 and Value3 are of the datatype defined by the selected column.
+	
+
+**New: `Rules/ConditionalRule.cs`** — the rule data model plus `ConditionalRuleEngine`, which infers each column's data type (Date/Time by name, Integer/Decimal by sampling every value in the column, Text otherwise) and evaluates/applies the rule.
+
+**New: `Dialogs/ConditionalRuleDialog.cs`** — the IF/THEN builder UI. Column A/B/C dropdowns are populated dynamically from `CurrentLayout()` (the grid's actual current columns, in their on-screen order). Picking a column swaps in the matching value editor for Value1/2/3 automatically: a plain text box for text columns, a `NumericUpDown` for integer/decimal columns, and a `DateTimePicker` for date (`YYYY-MM-DD`, stored as ADIF `YYYYMMDD`) or time (`HH:mm:ss`, stored as ADIF `HHMMSS`) columns — so the value's input control genuinely matches the selected column's data type rather than being one generic text field. A checkbox enables a second condition with an AND/OR choice.
+
+**`MainForm.cs`** — added **Edit → Apply Conditional Rule...** (Ctrl+R) and a **Conditional Rule** toolbar button. Clicking it opens the dialog, then previews how many rows match before doing anything (asks "This will set X = Y on N matching row(s). Continue?"), applies inside the existing `Bulk()` helper so the grid doesn't repaint per-row, and reports matched/updated counts — following the same pattern as the existing TEST-FT8/FT4/FT2 commands.
+
+Since it's an SDK-style project, the new files under `Rules/` and `Dialogs/` are picked up automatically by the project's default glob — no `.csproj` edit needed. Go ahead and rebuild in Visual Studio; let me know how it goes or if anything needs adjusting (e.g., different default operator order, or seeding Value1/2/3 with an existing cell's value when you open the dialog).
+
+

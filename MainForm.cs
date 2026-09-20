@@ -3,6 +3,7 @@ using System.Globalization;
 using HamLoggerEditor.Adif;
 using HamLoggerEditor.Dialogs;
 using HamLoggerEditor.Export;
+using HamLoggerEditor.Rules;
 
 namespace HamLoggerEditor;
 
@@ -123,6 +124,8 @@ public sealed class MainForm : Form
         edit.DropDownItems.Add(showDupsOnlyItem);
         edit.DropDownItems.Add(Item("&Clear Duplicate Highlights", Keys.None, ClearDuplicates));
         edit.DropDownItems.Add(new ToolStripSeparator());
+        edit.DropDownItems.Add(Item("Apply Conditional &Rule...", Keys.Control | Keys.R, ApplyConditionalRule));
+        edit.DropDownItems.Add(new ToolStripSeparator());
         edit.DropDownItems.Add(Item("TEST-FT&8  (COMMENT → MODE)", Keys.None, () => RunModeTest("FT8", "FT8", null)));
         edit.DropDownItems.Add(Item("TEST-FT&4  (COMMENT → MFSK / FT4)", Keys.None, () => RunModeTest("FT4", MfskMode, "FT4")));
         edit.DropDownItems.Add(Item("TEST-FT&2  (COMMENT → MFSK / FT2)", Keys.None, () => RunModeTest("FT2", MfskMode, "FT2")));
@@ -157,6 +160,7 @@ public sealed class MainForm : Form
         bar.Items.Add(Button("Add Contact", "Add a new row", AddContact));
         bar.Items.Add(Button("Delete Selected", "Delete the selected rows", DeleteSelected));
         bar.Items.Add(Button("Search/Replace", "Search and replace (Ctrl+H)", ShowSearchReplace));
+        bar.Items.Add(Button("Conditional Rule", "Apply an IF/THEN rule to matching rows (Ctrl+R)", ApplyConditionalRule));
         bar.Items.Add(new ToolStripSeparator());
         bar.Items.Add(Button("Date/Time ▲", "Sort by QSO_DATE + TIME_ON, oldest first", () => SortByDateTime(true)));
         bar.Items.Add(Button("Date/Time ▼", "Sort by QSO_DATE + TIME_ON, newest first", () => SortByDateTime(false)));
@@ -923,6 +927,53 @@ public sealed class MainForm : Form
             $"{matched:N0} row(s) have \"{token}\" in {comment.ColumnName}.\n{updated:N0} row(s) were updated to {what}." +
             (matched > updated ? $"\n{matched - updated:N0} row(s) already had those values." : string.Empty),
             title, MessageBoxButtons.OK, MessageBoxIcon.Information);
+    }
+
+    /// <summary>
+    /// Lets the user build an IF (ColumnA op Value1) [AND/OR (ColumnB op Value2)] THEN (ColumnC = Value3)
+    /// rule from the grid's current columns, previews how many rows it matches, then applies it.
+    /// </summary>
+    private void ApplyConditionalRule()
+    {
+        try
+        {
+            grid.EndEdit();
+            var columnNames = CurrentLayout().Select(c => c.Name).ToList();
+            if (columnNames.Count == 0)
+            {
+                MessageBox.Show(this, "There are no columns to build a rule from.", "Apply Conditional Rule",
+                    MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+
+            using var dialog = new ConditionalRuleDialog(table, columnNames);
+            if (dialog.ShowDialog(this) != DialogResult.OK || dialog.Result is not { } rule) return;
+
+            int previewMatches = ConditionalRuleEngine.CountMatches(table, rule);
+            if (previewMatches == 0)
+            {
+                MessageBox.Show(this, "No rows match this rule.", "Apply Conditional Rule",
+                    MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+            if (MessageBox.Show(this,
+                    $"This will set {rule.ColumnC} = \"{rule.ValueC}\" on {previewMatches:N0} matching row(s). Continue?",
+                    "Apply Conditional Rule", MessageBoxButtons.OKCancel, MessageBoxIcon.Question) != DialogResult.OK) return;
+
+            (int Matched, int Updated) result = default;
+            Bulk(() => result = ConditionalRuleEngine.Apply(table, rule));
+
+            MarkDirty();
+            UpdateStatus($"Conditional rule: {result.Matched:N0} row(s) matched, {result.Updated:N0} updated");
+            MessageBox.Show(this,
+                $"{result.Matched:N0} row(s) matched the condition.\n{result.Updated:N0} row(s) were updated." +
+                (result.Matched > result.Updated ? $"\n{result.Matched - result.Updated:N0} row(s) already had that value." : string.Empty),
+                "Apply Conditional Rule", MessageBoxButtons.OK, MessageBoxIcon.Information);
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(this, ex.Message, "Apply Conditional Rule", MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
     }
 
     #endregion
