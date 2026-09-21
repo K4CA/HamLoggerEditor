@@ -4,12 +4,10 @@ using HamLoggerEditor.Adif;
 using HamLoggerEditor.Dialogs;
 using HamLoggerEditor.Export;
 using HamLoggerEditor.Rules;
-using HamLoggerEditor.Services;
-using HamLoggerEditor.UI;
 
 namespace HamLoggerEditor;
 
-public sealed class MainForm : Form, ISearchHost
+public sealed class MainForm : Form
 {
     private const string AppTitle = "HamLogger Contact Editor  Version 1.1";
 
@@ -42,10 +40,6 @@ public sealed class MainForm : Form, ISearchHost
     private readonly ToolStripMenuItem showDupsOnlyItem = new("Show &Duplicates Only");
     private readonly ToolStripMenuItem removeSourceItem = new("Remove &Source File Column");
     private SearchReplaceDialog? searchDialog;
-    private readonly MenuStrip _mainMenuStrip;
-    private readonly ToolStrip _mainToolStrip;
-    private readonly StatusProgress _statusProgress;
-    private bool _closeConfirmed;
 
     private DataTable table = new();
     private string? currentPath;
@@ -61,12 +55,10 @@ public sealed class MainForm : Form, ISearchHost
         Width = 1450;
         Height = 750;
 
-        var menu = _mainMenuStrip = BuildMenu();
-        var toolBar = _mainToolStrip = BuildToolBar();
+        var menu = BuildMenu();
+        var toolBar = BuildToolBar();
         var statusStrip = new StatusStrip();
         statusStrip.Items.Add(status);
-        _statusProgress = new StatusProgress(statusStrip);
-        _statusProgress.BusyChanged += (_, busy) => OnBusyChanged(busy);
         BuildHeaderMenu();
 
         grid.Dock = DockStyle.Fill;
@@ -83,7 +75,6 @@ public sealed class MainForm : Form, ISearchHost
         grid.CellFormatting += Grid_CellFormatting;
         grid.ColumnHeaderMouseClick += Grid_ColumnHeaderMouseClick;
         grid.ColumnDisplayIndexChanged += (_, _) => { if (!suppressEvents) MarkDirty(); };
-        grid.CellBeginEdit += (_, e) => { if (_statusProgress.IsBusy) e.Cancel = true; }; // no edits while a background job reads the data
         typeof(DataGridView).GetProperty("DoubleBuffered",
             System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)?.SetValue(grid, true);
 
@@ -93,7 +84,6 @@ public sealed class MainForm : Form, ISearchHost
         Controls.Add(statusStrip);
         MainMenuStrip = menu;
         FormClosing += MainForm_FormClosing;
-        Disposed += (_, _) => _statusProgress.Dispose();
 
         LoadTable(CreateTable(DefaultFields), autoSize: false);
         UpdateTitle();
@@ -107,18 +97,18 @@ public sealed class MainForm : Form, ISearchHost
         var menu = new MenuStrip();
 
         var file = new ToolStripMenuItem("&File");
-        file.DropDownItems.Add(Item("&New", Keys.Control | Keys.N, NewFileAsync));
-        file.DropDownItems.Add(Item("&Open ADIF...", Keys.Control | Keys.O, OpenFileAsync));
-        file.DropDownItems.Add(Item("&Merge ADIF File...", Keys.Control | Keys.M, MergeFileAsync));
+        file.DropDownItems.Add(Item("&New", Keys.Control | Keys.N, NewFile));
+        file.DropDownItems.Add(Item("&Open ADIF...", Keys.Control | Keys.O, OpenFile));
+        file.DropDownItems.Add(Item("&Merge ADIF File...", Keys.Control | Keys.M, MergeFile));
         file.DropDownItems.Add(new ToolStripSeparator());
-        file.DropDownItems.Add(Item("&Save", Keys.Control | Keys.S, () => SaveFileAsync(false)));
-        file.DropDownItems.Add(Item("Save &As...", Keys.Control | Keys.Shift | Keys.S, () => SaveFileAsync(true)));
-        file.DropDownItems.Add(Item("Save Se&lected Rows As...", Keys.None, SaveSelectedRowsAsync));
+        file.DropDownItems.Add(Item("&Save", Keys.Control | Keys.S, () => SaveFile(false)));
+        file.DropDownItems.Add(Item("Save &As...", Keys.Control | Keys.Shift | Keys.S, () => SaveFile(true)));
+        file.DropDownItems.Add(Item("Save Se&lected Rows As...", Keys.None, SaveSelectedRows));
         file.DropDownItems.Add(new ToolStripSeparator());
         var export = new ToolStripMenuItem("&Export");
-        export.DropDownItems.Add(Item("&CSV File...", Keys.None, ExportCsvAsync));
-        export.DropDownItems.Add(Item("S&QLite INSERT Script...", Keys.None, () => ExportSqlAsync(SqlDialect.SQLite)));
-        export.DropDownItems.Add(Item("SQL &Server INSERT Script...", Keys.None, () => ExportSqlAsync(SqlDialect.SqlServer)));
+        export.DropDownItems.Add(Item("&CSV File...", Keys.None, ExportCsv));
+        export.DropDownItems.Add(Item("S&QLite INSERT Script...", Keys.None, () => ExportSql(SqlDialect.SQLite)));
+        export.DropDownItems.Add(Item("SQL &Server INSERT Script...", Keys.None, () => ExportSql(SqlDialect.SqlServer)));
         file.DropDownItems.Add(export);
         file.DropDownItems.Add(new ToolStripSeparator());
         file.DropDownItems.Add(Item("E&xit", Keys.None, Close));
@@ -162,10 +152,10 @@ public sealed class MainForm : Form, ISearchHost
     private ToolStrip BuildToolBar()
     {
         var bar = new ToolStrip { GripStyle = ToolStripGripStyle.Hidden, Dock = DockStyle.Top };
-        bar.Items.Add(Button("Open ADIF", "Open an ADIF file; its field names become the columns", OpenFileAsync));
-        bar.Items.Add(Button("Merge File", "Add the rows of another ADIF file (tagged with its file name)", MergeFileAsync));
-        bar.Items.Add(Button("Save ADIF", "Save all rows", () => SaveFileAsync(false)));
-        bar.Items.Add(Button("Save Selected", "Save only the selected rows to a new ADIF file", SaveSelectedRowsAsync));
+        bar.Items.Add(Button("Open ADIF", "Open an ADIF file; its field names become the columns", OpenFile));
+        bar.Items.Add(Button("Merge File", "Add the rows of another ADIF file (tagged with its file name)", MergeFile));
+        bar.Items.Add(Button("Save ADIF", "Save all rows", () => SaveFile(false)));
+        bar.Items.Add(Button("Save Selected", "Save only the selected rows to a new ADIF file", SaveSelectedRows));
         bar.Items.Add(new ToolStripSeparator());
         bar.Items.Add(Button("Add Contact", "Add a new row", AddContact));
         bar.Items.Add(Button("Delete Selected", "Delete the selected rows", DeleteSelected));
@@ -182,9 +172,9 @@ public sealed class MainForm : Form, ISearchHost
         bar.Items.Add(Button("TEST-FT4", "Rows whose COMMENT contains FT4: MODE = MFSK, SUBMODE = FT4", () => RunModeTest("FT4", MfskMode, "FT4")));
         bar.Items.Add(Button("TEST-FT2", "Rows whose COMMENT contains FT2: MODE = MFSK, SUBMODE = FT2", () => RunModeTest("FT2", MfskMode, "FT2")));
         bar.Items.Add(new ToolStripSeparator());
-        bar.Items.Add(Button("Export CSV", "Export all rows to a CSV file", ExportCsvAsync));
-        bar.Items.Add(Button("SQLite Script", "Create a SQLite INSERT script", () => ExportSqlAsync(SqlDialect.SQLite)));
-        bar.Items.Add(Button("SQL Server Script", "Create a SQL Server INSERT script", () => ExportSqlAsync(SqlDialect.SqlServer)));
+        bar.Items.Add(Button("Export CSV", "Export all rows to a CSV file", ExportCsv));
+        bar.Items.Add(Button("SQLite Script", "Create a SQLite INSERT script", () => ExportSql(SqlDialect.SQLite)));
+        bar.Items.Add(Button("SQL Server Script", "Create a SQL Server INSERT script", () => ExportSql(SqlDialect.SqlServer)));
         return bar;
     }
 
@@ -207,63 +197,15 @@ public sealed class MainForm : Form, ISearchHost
         };
     }
 
-    private ToolStripMenuItem Item(string text, Keys keys, Action action)
+    private static ToolStripMenuItem Item(string text, Keys keys, Action action)
     {
-        var item = new ToolStripMenuItem(text, null, (_, _) => RunCommand(action));
+        var item = new ToolStripMenuItem(text, null, (_, _) => action());
         if (keys != Keys.None) item.ShortcutKeys = keys;
         return item;
     }
 
-    private ToolStripMenuItem Item(string text, Keys keys, Func<Task> action)
-    {
-        var item = new ToolStripMenuItem(text, null, (_, _) => RunCommand(action));
-        if (keys != Keys.None) item.ShortcutKeys = keys;
-        return item;
-    }
-
-    private ToolStripButton Button(string text, string tip, Action action) =>
-        new(text, null, (_, _) => RunCommand(action)) { DisplayStyle = ToolStripItemDisplayStyle.Text, ToolTipText = tip };
-
-    private ToolStripButton Button(string text, string tip, Func<Task> action) =>
-        new(text, null, (_, _) => RunCommand(action)) { DisplayStyle = ToolStripItemDisplayStyle.Text, ToolTipText = tip };
-
-    /// <summary>Top-level entry point for menu/toolbar commands: ignored while busy, errors shown instead of crashing.</summary>
-    private void RunCommand(Action action)
-    {
-        if (_statusProgress.IsBusy) return;
-        try { action(); }
-        catch (Exception ex) { ShowError("Unexpected error", ex); }
-    }
-
-    /// <summary>Async version: <c>async void</c> is acceptable only here, at the UI event boundary.</summary>
-    private async void RunCommand(Func<Task> action)
-    {
-        if (_statusProgress.IsBusy) return;
-        try { await action(); }
-        catch (Exception ex) { ShowError("Unexpected error", ex); }
-    }
-
-    private void ShowError(string title, Exception ex) =>
-        MessageBox.Show(this, ex.Message, title, MessageBoxButtons.OK, MessageBoxIcon.Error);
-
-    /// <summary>While a background job runs, commands that would change the log are disabled; the window stays responsive.</summary>
-    private void OnBusyChanged(bool busy)
-    {
-        _mainMenuStrip.Enabled = !busy;
-        _mainToolStrip.Enabled = !busy;
-        grid.Cursor = busy ? Cursors.AppStarting : Cursors.Default;
-        if (busy) grid.EndEdit();
-    }
-
-    /// <summary>Starts a status-bar operation, or returns null (after telling the user) when one is already running.</summary>
-    private StatusOperation? BeginOperation(string caption)
-    {
-        if (!_statusProgress.IsBusy) return _statusProgress.Begin(caption);
-        UpdateStatus("Please wait for the current operation to finish");
-        return null;
-    }
-
-    private static string Took(StatusOperation operation) => StatusProgress.FormatElapsed(operation.Elapsed);
+    private static ToolStripButton Button(string text, string tip, Action action) =>
+        new(text, null, (_, _) => action()) { DisplayStyle = ToolStripItemDisplayStyle.Text, ToolTipText = tip };
 
     #endregion
 
@@ -329,57 +271,27 @@ public sealed class MainForm : Form, ISearchHost
     /// </summary>
     private void RebuildGrid(IReadOnlyList<ColumnSpec> layout, bool keepSortAndFilter = true, Action? schemaChange = null)
     {
-        GridState state = UnbindGrid(keepSortAndFilter);
-        try
-        {
-            schemaChange?.Invoke(); // runs while nothing is bound, so bulk edits don't repaint the grid
-        }
-        finally
-        {
-            RebindGrid(layout, state);
-        }
-    }
-
-    /// <summary>What <see cref="UnbindGrid"/> saved so <see cref="RebindGrid"/> can restore it.</summary>
-    private sealed record GridState(string Sort, string Filter, int SourceWidth);
-
-    /// <summary>
-    /// Detaches the table from the grid. Until <see cref="RebindGrid"/> runs, nothing on screen observes
-    /// the table, so it may be filled on a background thread (with <c>suppressEvents</c> still true).
-    /// </summary>
-    private GridState UnbindGrid(bool keepSortAndFilter)
-    {
         grid.EndEdit();
         // Read from the DataView: header-click sorts update it, but not BindingSource.Sort.
-        var state = new GridState(
-            keepSortAndFilter ? table.DefaultView.Sort ?? string.Empty : string.Empty,
-            keepSortAndFilter ? table.DefaultView.RowFilter ?? string.Empty : string.Empty,
-            grid.Columns.Contains(SourceColumn) ? grid.Columns[SourceColumn].Width : 160);
+        string sort = keepSortAndFilter ? table.DefaultView.Sort ?? string.Empty : string.Empty;
+        string filter = keepSortAndFilter ? table.DefaultView.RowFilter ?? string.Empty : string.Empty;
+        int sourceWidth = grid.Columns.Contains(SourceColumn) ? grid.Columns[SourceColumn].Width : 160;
 
         suppressEvents = true;
         grid.SuspendLayout();
-        // Clear any sort/filter the BindingSource remembers: it re-applies them whenever its
-        // DataSource changes, which throws when the new list lacks those columns.
-        TrySet(source.RemoveSort);
-        TrySet(source.RemoveFilter);
-        grid.DataSource = null;
-        grid.Columns.Clear();
-        source.DataSource = null;
-        table.DefaultView.Sort = string.Empty;
-        table.DefaultView.RowFilter = string.Empty;
-        return state;
-    }
-
-    /// <summary>
-    /// Applies a column layout (deletes table columns not listed, renames, creates new ones where Key == null),
-    /// rebuilds the grid columns in the listed order and binds the table again. Source File stays leftmost.
-    /// </summary>
-    private void RebindGrid(IReadOnlyList<ColumnSpec> layout, GridState state)
-    {
-        string sort = state.Sort, filter = state.Filter;
-        int sourceWidth = state.SourceWidth;
         try
         {
+            // Clear any sort/filter the BindingSource remembers: it re-applies them whenever its
+            // DataSource changes, which throws when the new list lacks those columns.
+            TrySet(source.RemoveSort);
+            TrySet(source.RemoveFilter);
+            grid.DataSource = null;
+            grid.Columns.Clear();
+            source.DataSource = null;
+            table.DefaultView.Sort = string.Empty;
+            table.DefaultView.RowFilter = string.Empty;
+            schemaChange?.Invoke(); // runs while nothing is bound, so bulk edits don't repaint the grid
+
             // 1. Delete columns that are no longer in the layout.
             var keep = new HashSet<string>(layout.Where(s => s.Key is not null).Select(s => s.Key!), StringComparer.Ordinal);
             foreach (DataColumn column in FieldColumns().Where(c => !keep.Contains(c.ColumnName)).ToList())
@@ -483,7 +395,7 @@ public sealed class MainForm : Form, ISearchHost
 
     private void Grid_ColumnHeaderMouseClick(object? sender, DataGridViewCellMouseEventArgs e)
     {
-        if (e.Button != MouseButtons.Right || e.ColumnIndex < 0 || _statusProgress.IsBusy) return;
+        if (e.Button != MouseButtons.Right || e.ColumnIndex < 0) return;
         headerMenuColumn = grid.Columns[e.ColumnIndex];
         headerMenu.Show(Cursor.Position);
     }
@@ -499,9 +411,9 @@ public sealed class MainForm : Form, ISearchHost
 
     #region File commands
 
-    private async Task NewFileAsync()
+    private void NewFile()
     {
-        if (!await ConfirmDiscardAsync()) return;
+        if (!ConfirmDiscard()) return;
         LoadTable(CreateTable(DefaultFields), autoSize: false);
         currentPath = null;
         dirty = mergedSinceSave = false;
@@ -509,64 +421,47 @@ public sealed class MainForm : Form, ISearchHost
         UpdateStatus("New contact list");
     }
 
-    private async Task OpenFileAsync()
+    private void OpenFile()
     {
-        if (!await ConfirmDiscardAsync()) return;
+        if (!ConfirmDiscard()) return;
         using var dialog = new OpenFileDialog
         {
             Filter = "ADIF files (*.adi;*.adif)|*.adi;*.adif|All files (*.*)|*.*",
             Title = "Open ADIF Log"
         };
-        if (dialog.ShowDialog(this) == DialogResult.OK) await OpenPathAsync(dialog.FileName);
+        if (dialog.ShowDialog(this) == DialogResult.OK) OpenPath(dialog.FileName);
     }
 
-    /// <summary>Reads and parses the file and builds the new table on a background thread, then binds it.</summary>
-    private async Task OpenPathAsync(string path)
+    private void OpenPath(string path)
     {
-        using StatusOperation? operation = BeginOperation($"Loading {Path.GetFileName(path)}");
-        if (operation is null) return;
         try
         {
-            var loaded = await Task.Run(() => BuildTableFromFile(path, operation.Progress, operation.Token), operation.Token);
-            LoadTable(loaded.Table, autoSize: true);
+            UseWaitCursor = true;
+            AdifLog log = AdifFile.Load(path);
+            // The columns come from the field names used in this (first) file.
+            var fields = log.FieldNames.Where(f => !IgnoredFields.Contains(f)).ToList();
+            DataTable newTable = CreateTable(fields.Count > 0 ? fields : DefaultFields);
+            newTable.BeginLoadData();
+            foreach (AdifRecord record in log.Records) AddRecord(newTable, record, null, null);
+            newTable.EndLoadData();
+
+            LoadTable(newTable, autoSize: true);
             currentPath = path;
             dirty = mergedSinceSave = false;
             UpdateTitle();
-            UpdateStatus($"Loaded {loaded.Table.Rows.Count:N0} contacts with {loaded.FieldCount} fields from {Path.GetFileName(path)} in {Took(operation)}");
-        }
-        catch (OperationCanceledException)
-        {
-            UpdateStatus("Open cancelled; the current log is unchanged");
+            UpdateStatus($"Loaded {log.Records.Count:N0} contacts with {fields.Count} fields from {Path.GetFileName(currentPath)}");
         }
         catch (Exception ex)
         {
-            ShowError("Unable to open ADIF", ex);
+            MessageBox.Show(this, ex.Message, "Unable to open ADIF", MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
-    }
-
-    /// <summary>Background work for Open: parse (0–80%), then build the DataTable (80–100%). Touches no UI.</summary>
-    private static (DataTable Table, int FieldCount) BuildTableFromFile(string path, IProgress<int> progress, CancellationToken token)
-    {
-        AdifLog log = AdifFile.Load(path, new ProgressRange(progress, 0, 80), token);
-        // The columns come from the field names used in this (first) file.
-        var fields = log.FieldNames.Where(f => !IgnoredFields.Contains(f)).ToList();
-        DataTable newTable = CreateTable(fields.Count > 0 ? fields : DefaultFields);
-        var reporter = new PercentReporter(new ProgressRange(progress, 80, 100), log.Records.Count);
-        newTable.BeginLoadData();
-        for (int i = 0; i < log.Records.Count; i++)
+        finally
         {
-            if (i % 1000 == 0)
-            {
-                token.ThrowIfCancellationRequested();
-                reporter.Report(i);
-            }
-            AddRecord(newTable, log.Records[i], null, null);
+            UseWaitCursor = false;
         }
-        newTable.EndLoadData();
-        return (newTable, fields.Count);
     }
 
-    private static DataRow AddRecord(DataTable t, AdifRecord record, IReadOnlyDictionary<string, string>? fieldMap, string? sourceFile)
+    private static void AddRecord(DataTable t, AdifRecord record, IReadOnlyDictionary<string, string>? fieldMap, string? sourceFile)
     {
         DataRow row = t.NewRow();
         foreach (var (name, value) in record.Fields)
@@ -578,10 +473,9 @@ public sealed class MainForm : Form, ISearchHost
         row[DupColumn] = 0;
         if (sourceFile is not null && t.Columns.Contains(SourceColumn)) row[SourceColumn] = sourceFile;
         t.Rows.Add(row);
-        return row;
     }
 
-    private async Task MergeFileAsync()
+    private void MergeFile()
     {
         using var dialog = new OpenFileDialog
         {
@@ -593,30 +487,18 @@ public sealed class MainForm : Form, ISearchHost
         // Nothing loaded yet: this is the first file, so its field names define the columns.
         if (table.Rows.Count == 0 && !dirty)
         {
-            await OpenPathAsync(dialog.FileName);
+            OpenPath(dialog.FileName);
             return;
         }
 
-        string fileName = Path.GetFileName(dialog.FileName);
         AdifLog log;
-        using (StatusOperation? reading = BeginOperation($"Reading {fileName}"))
+        try { log = AdifFile.Load(dialog.FileName); }
+        catch (Exception ex)
         {
-            if (reading is null) return;
-            try
-            {
-                log = await Task.Run(() => AdifFile.Load(dialog.FileName, reading.Progress, reading.Token), reading.Token);
-            }
-            catch (OperationCanceledException)
-            {
-                UpdateStatus("Merge cancelled; nothing was changed");
-                return;
-            }
-            catch (Exception ex)
-            {
-                ShowError("Unable to open ADIF", ex);
-                return;
-            }
+            MessageBox.Show(this, ex.Message, "Unable to open ADIF", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            return;
         }
+        string fileName = Path.GetFileName(dialog.FileName);
 
         // Match the new file's fields to existing columns (by current name, or by original name if renamed).
         var fieldMap = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
@@ -628,7 +510,7 @@ public sealed class MainForm : Form, ISearchHost
             else unknown.Add(field);
         }
 
-        var newColumns = new List<string>();
+        var layout = CurrentLayout();
         if (unknown.Count > 0)
         {
             DialogResult answer = MessageBox.Show(this,
@@ -641,99 +523,39 @@ public sealed class MainForm : Form, ISearchHost
                 foreach (string field in unknown)
                 {
                     string name = field.ToUpperInvariant();
-                    if (!newColumns.Contains(name, StringComparer.OrdinalIgnoreCase)) newColumns.Add(name);
+                    layout.Add(new ColumnSpec(null, name, 100));
                     fieldMap[field] = name;
                 }
             }
         }
 
-        using StatusOperation? operation = BeginOperation($"Merging {fileName}");
-        if (operation is null) return;
-
-        var layout = CurrentLayout();
-        layout.AddRange(newColumns.Select(n => new ColumnSpec(n, n, 100)));
-        string original = currentPath is null ? "(original)" : Path.GetFileName(currentPath);
-        GridState state = UnbindGrid(keepSortAndFilter: true);
-        MergeResult? result = null;
-        try
+        // Add the temporary Source File column and label the rows that were already loaded.
+        RebuildGrid(layout, schemaChange: () =>
         {
-            // The table is unbound, so it can be filled on a background thread without touching the grid.
-            DataTable target = table;
-            result = await Task.Run(() => MergeRecords(target, log, fieldMap, newColumns, original, fileName,
-                operation.Progress, operation.Token), operation.Token);
-        }
-        catch (OperationCanceledException)
+            if (table.Columns.Contains(SourceColumn)) return;
+            DataColumn column = table.Columns.Add(SourceColumn, typeof(string));
+            string original = currentPath is null ? "(original)" : Path.GetFileName(currentPath);
+            foreach (DataRow row in table.Rows) row[column] = original;
+        });
+
+        Bulk(() =>
         {
-            UpdateStatus("Merge cancelled; nothing was changed");
-        }
-        catch (Exception ex)
-        {
-            ShowError("Unable to merge ADIF", ex);
-        }
-        finally
-        {
-            // Columns removed by a cancelled merge drop out of the layout here.
-            RebindGrid(layout.Where(s => table.Columns.Contains(s.Key ?? s.Name)).ToList(), state);
-        }
-
-        if (result is null) return;
-        mergedSinceSave = true;
-        MarkDirty();
-        UpdateStatus($"Merged {result.RowsAdded:N0} contacts from {fileName} in {Took(operation)}");
-    }
-
-    private sealed record MergeResult(int RowsAdded);
-
-    /// <summary>
-    /// Background work for Merge, on an unbound table. On cancellation or error it removes everything it
-    /// added (rows, new columns, the Source File column), so the log is exactly as it was.
-    /// </summary>
-    private static MergeResult MergeRecords(DataTable target, AdifLog log, IReadOnlyDictionary<string, string> fieldMap,
-        IReadOnlyList<string> newColumns, string originalFileName, string fileName, IProgress<int> progress, CancellationToken token)
-    {
-        var addedColumns = new List<DataColumn>();
-        var addedRows = new List<DataRow>(log.Records.Count);
-        bool addedSource = false;
-        try
-        {
-            foreach (string name in newColumns)
-                if (!target.Columns.Contains(name)) addedColumns.Add(AddDataColumn(target, name));
-
-            // Add the temporary Source File column and label the rows that were already loaded.
-            if (!target.Columns.Contains(SourceColumn))
-            {
-                DataColumn column = target.Columns.Add(SourceColumn, typeof(string));
-                addedSource = true;
-                foreach (DataRow row in target.Rows) row[column] = originalFileName;
-            }
-
-            var reporter = new PercentReporter(progress, log.Records.Count);
-            target.BeginLoadData();
+            suppressEvents = true;
             try
             {
-                for (int i = 0; i < log.Records.Count; i++)
-                {
-                    if (i % 1000 == 0)
-                    {
-                        token.ThrowIfCancellationRequested();
-                        reporter.Report(i);
-                    }
-                    addedRows.Add(AddRecord(target, log.Records[i], fieldMap, fileName));
-                }
+                table.BeginLoadData();
+                foreach (AdifRecord record in log.Records) AddRecord(table, record, fieldMap, fileName);
+                table.EndLoadData();
             }
-            finally { target.EndLoadData(); }
-            return new MergeResult(addedRows.Count);
-        }
-        catch
-        {
-            foreach (DataRow row in addedRows) target.Rows.Remove(row);
-            foreach (DataColumn column in addedColumns) target.Columns.Remove(column);
-            if (addedSource) target.Columns.Remove(SourceColumn);
-            throw;
-        }
+            finally { suppressEvents = false; }
+        });
+
+        mergedSinceSave = true;
+        MarkDirty();
+        UpdateStatus($"Merged {log.Records.Count:N0} contacts from {fileName}");
     }
 
-    private async Task<bool> SaveFileAsync(bool saveAs)
+    private bool SaveFile(bool saveAs)
     {
         grid.EndEdit();
         source.EndEdit();
@@ -745,48 +567,25 @@ public sealed class MainForm : Form, ISearchHost
                 path is null ? "contacts.adi" : Path.GetFileName(path));
             if (path is null) return false;
         }
-
-        var columns = CurrentLayout().Select(c => c.Name).ToList();
-        var rows = AllRowsInSortOrder();
-        bool saved = await WriteFileAsync($"Saving {Path.GetFileName(path)}", "Unable to save ADIF",
-            (progress, token) => AdifFile.Save(path, columns, RowValues(rows, columns), progress, token),
-            elapsed => $"Saved {rows.Count:N0} contacts to {Path.GetFileName(path)} in {elapsed}");
-        if (!saved) return false;
-
-        currentPath = path;
-        dirty = mergedSinceSave = false;
-        UpdateTitle();
-        return true;
-    }
-
-    /// <summary>
-    /// Runs a file write on a background thread with status-bar progress. Editing is locked meanwhile,
-    /// so reading the rows there is safe. Returns true when the file was written.
-    /// </summary>
-    private async Task<bool> WriteFileAsync(string caption, string errorTitle,
-        Action<IProgress<int>, CancellationToken> write, Func<string, string> successMessage)
-    {
-        using StatusOperation? operation = BeginOperation(caption);
-        if (operation is null) return false;
         try
         {
-            await Task.Run(() => write(operation.Progress, operation.Token), operation.Token);
-            UpdateStatus(successMessage(Took(operation)));
+            var columns = CurrentLayout().Select(c => c.Name).ToList();
+            var rows = AllRowsInSortOrder();
+            AdifFile.Save(path, columns, RowValues(rows, columns));
+            currentPath = path;
+            dirty = mergedSinceSave = false;
+            UpdateTitle();
+            UpdateStatus($"Saved {rows.Count:N0} contacts to {Path.GetFileName(path)}");
             return true;
-        }
-        catch (OperationCanceledException)
-        {
-            UpdateStatus("Cancelled; the file on disk was not changed");
-            return false;
         }
         catch (Exception ex)
         {
-            ShowError(errorTitle, ex);
+            MessageBox.Show(this, ex.Message, "Unable to save ADIF", MessageBoxButtons.OK, MessageBoxIcon.Error);
             return false;
         }
     }
 
-    private async Task SaveSelectedRowsAsync()
+    private void SaveSelectedRows()
     {
         grid.EndEdit();
         var rows = grid.SelectedRows.Cast<DataGridViewRow>()
@@ -801,11 +600,16 @@ public sealed class MainForm : Form, ISearchHost
         }
         string? path = AskSavePath($"Save {rows.Count:N0} Selected Row(s) As", "selected.adi");
         if (path is null) return;
-
-        var columns = CurrentLayout().Select(c => c.Name).ToList();
-        await WriteFileAsync($"Saving {Path.GetFileName(path)}", "Unable to save ADIF",
-            (progress, token) => AdifFile.Save(path, columns, RowValues(rows, columns), progress, token),
-            elapsed => $"Saved {rows.Count:N0} selected contacts to {Path.GetFileName(path)} in {elapsed}");
+        try
+        {
+            var columns = CurrentLayout().Select(c => c.Name).ToList();
+            AdifFile.Save(path, columns, RowValues(rows, columns));
+            UpdateStatus($"Saved {rows.Count:N0} selected contacts to {Path.GetFileName(path)}");
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(this, ex.Message, "Unable to save ADIF", MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
     }
 
     private string? AskSavePath(string title, string defaultName)
@@ -821,7 +625,7 @@ public sealed class MainForm : Form, ISearchHost
         return dialog.ShowDialog(this) == DialogResult.OK ? dialog.FileName : null;
     }
 
-    private async Task ExportCsvAsync()
+    private void ExportCsv()
     {
         grid.EndEdit();
         using var dialog = new SaveFileDialog
@@ -833,16 +637,20 @@ public sealed class MainForm : Form, ISearchHost
             FileName = Path.GetFileNameWithoutExtension(currentPath ?? "contacts") + ".csv"
         };
         if (dialog.ShowDialog(this) != DialogResult.OK) return;
-
-        string path = dialog.FileName;
-        var (headers, columns) = ExportColumns();
-        var rows = AllRowsInSortOrder();
-        await WriteFileAsync($"Exporting {Path.GetFileName(path)}", "Unable to export CSV",
-            (progress, token) => CsvExporter.Save(path, headers, RowValues(rows, columns), progress, token),
-            elapsed => $"Exported {rows.Count:N0} rows to {Path.GetFileName(path)} in {elapsed}");
+        try
+        {
+            var (headers, columns) = ExportColumns();
+            var rows = AllRowsInSortOrder();
+            CsvExporter.Save(dialog.FileName, headers, RowValues(rows, columns));
+            UpdateStatus($"Exported {rows.Count:N0} rows to {Path.GetFileName(dialog.FileName)}");
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(this, ex.Message, "Unable to export CSV", MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
     }
 
-    private async Task ExportSqlAsync(SqlDialect dialect)
+    private void ExportSql(SqlDialect dialect)
     {
         grid.EndEdit();
         string dbName = dialect == SqlDialect.SQLite ? "SQLite" : "SQL Server";
@@ -859,13 +667,17 @@ public sealed class MainForm : Form, ISearchHost
             FileName = $"{Path.GetFileNameWithoutExtension(currentPath ?? "contacts")}_{(dialect == SqlDialect.SQLite ? "sqlite" : "sqlserver")}.sql"
         };
         if (dialog.ShowDialog(this) != DialogResult.OK) return;
-
-        string path = dialog.FileName;
-        var (headers, columns) = ExportColumns();
-        var rows = AllRowsInSortOrder();
-        await WriteFileAsync($"Writing {Path.GetFileName(path)}", $"Unable to create {dbName} script",
-            (progress, token) => SqlScriptExporter.Save(path, dialect, tableName, headers, RowValues(rows, columns), progress, token),
-            elapsed => $"Wrote {dbName} script for {rows.Count:N0} rows to {Path.GetFileName(path)} in {elapsed}");
+        try
+        {
+            var (headers, columns) = ExportColumns();
+            var rows = AllRowsInSortOrder();
+            SqlScriptExporter.Save(dialog.FileName, dialect, tableName, headers, RowValues(rows, columns));
+            UpdateStatus($"Wrote {dbName} script for {rows.Count:N0} rows to {Path.GetFileName(dialog.FileName)}");
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(this, ex.Message, $"Unable to create {dbName} script", MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
     }
 
     /// <summary>Columns in on-screen order (including Source File, exported as SOURCE_FILE).</summary>
@@ -876,7 +688,7 @@ public sealed class MainForm : Form, ISearchHost
         return (headers, columns);
     }
 
-    private async Task<bool> ConfirmDiscardAsync()
+    private bool ConfirmDiscard()
     {
         grid.EndEdit();
         if (!dirty) return true;
@@ -884,7 +696,7 @@ public sealed class MainForm : Form, ISearchHost
             MessageBoxButtons.YesNoCancel, MessageBoxIcon.Question);
         return result switch
         {
-            DialogResult.Yes => await SaveFileAsync(false),
+            DialogResult.Yes => SaveFile(false),
             DialogResult.No => true,
             _ => false
         };
@@ -892,25 +704,7 @@ public sealed class MainForm : Form, ISearchHost
 
     private void MainForm_FormClosing(object? sender, FormClosingEventArgs e)
     {
-        if (_closeConfirmed || e.CloseReason == CloseReason.WindowsShutDown) return;
-        if (_statusProgress.IsBusy)
-        {
-            e.Cancel = true;
-            MessageBox.Show(this, "An operation is still running. Wait for it to finish or click Cancel in the status bar.",
-                AppTitle, MessageBoxButtons.OK, MessageBoxIcon.Information);
-            return;
-        }
-        grid.EndEdit();
-        if (!dirty) return;
-
-        // Saving is asynchronous, so cancel this close, ask/save, then close again.
-        e.Cancel = true;
-        RunCommand(async () =>
-        {
-            if (!await ConfirmDiscardAsync()) return;
-            _closeConfirmed = true;
-            Close();
-        });
+        if (!ConfirmDiscard()) e.Cancel = true;
     }
 
     #endregion
@@ -929,10 +723,10 @@ public sealed class MainForm : Form, ISearchHost
         if (table.Columns.Contains(SourceColumn)) row[SourceColumn] = "(added)";
         table.Rows.Add(row);
 
-        int index = ViewIndexOf(row);
-        if (index >= 0)
+        DataGridViewRow? gridRow = grid.Rows.Cast<DataGridViewRow>()
+            .FirstOrDefault(r => (r.DataBoundItem as DataRowView)?.Row == row);
+        if (gridRow is not null)
         {
-            DataGridViewRow gridRow = grid.Rows[index];
             DataGridViewColumn? first = (FindColumn("CALL") is { } call ? grid.Columns[call.ColumnName] : null)
                 ?? OrderedGridColumns().FirstOrDefault(c => !c.ReadOnly);
             grid.ClearSelection();
@@ -962,72 +756,9 @@ public sealed class MainForm : Form, ISearchHost
 
     private void ShowSearchReplace()
     {
-        searchDialog ??= new SearchReplaceDialog(this);
-        searchDialog.ShowFor(this);
+        searchDialog ??= new SearchReplaceDialog(grid, UpdateStatus);
+        searchDialog.ShowFor(this, null);
     }
-
-    /// <summary>On-screen index of a row, found through the BindingSource so grid rows stay shared (fast for big logs).</summary>
-    private int ViewIndexOf(DataRow row)
-    {
-        for (int i = 0; i < source.Count; i++)
-            if (source[i] is DataRowView view && ReferenceEquals(view.Row, row)) return i;
-        return -1;
-    }
-
-    #region ISearchHost (used by the Search and Replace window)
-
-    IReadOnlyList<SearchColumn> ISearchHost.GetSearchColumns() =>
-        OrderedGridColumns()
-            .Where(c => c.Visible && !string.IsNullOrEmpty(c.DataPropertyName))
-            .Select(c => new SearchColumn(c.HeaderText, c.DataPropertyName, c.ReadOnly))
-            .ToList();
-
-    SearchSnapshot ISearchHost.CreateSnapshot(IReadOnlyList<string> columns)
-    {
-        grid.EndEdit();
-        // Copy only row references (fast); the values are read later on the background thread.
-        var rows = new List<DataRow>(source.Count);
-        for (int i = 0; i < source.Count; i++)
-            if (source[i] is DataRowView view) rows.Add(view.Row);
-        return new SearchSnapshot(rows, columns);
-    }
-
-    (int RowIndex, DataRow? Row, string? Column) ISearchHost.GetCurrentCell()
-    {
-        DataGridViewCell? cell = grid.CurrentCell;
-        if (cell is null || cell.RowIndex < 0 || cell.RowIndex >= source.Count) return (-1, null, null);
-        DataRow? row = (source[cell.RowIndex] as DataRowView)?.Row;
-        return (cell.RowIndex, row, grid.Columns[cell.ColumnIndex].DataPropertyName);
-    }
-
-    bool ISearchHost.SelectCell(DataRow row, string column)
-    {
-        int index = ViewIndexOf(row);
-        if (index < 0 || !grid.Columns.Contains(column)) return false;
-        grid.ClearSelection();
-        DataGridViewRow gridRow = grid.Rows[index];
-        grid.CurrentCell = gridRow.Cells[grid.Columns[column].Index];
-        gridRow.Selected = true;
-        return true;
-    }
-
-    bool ISearchHost.IsBusy => _statusProgress.IsBusy;
-
-    StatusOperation? ISearchHost.BeginOperation(string caption) => BeginOperation(caption);
-
-    void ISearchHost.ApplyChanges(IReadOnlyList<CellChange> changes, string description)
-    {
-        Bulk(() =>
-        {
-            foreach (CellChange change in changes)
-                if (change.Row.RowState != DataRowState.Detached && change.Row.Table.Columns.Contains(change.Column))
-                    change.Row[change.Column] = change.NewValue;
-        });
-        if (changes.Count > 0) MarkDirty();
-        UpdateStatus(description);
-    }
-
-    #endregion
 
     private static string NormalizeTime(string? value)
     {

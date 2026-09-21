@@ -10,14 +10,19 @@
 ### Framework & UI Architecture
 
 * **Designer Files:** NEVER manually modify <FormName>.Designer.cs or InitializeComponent() unless explicitly requested. Claude should write UI wire-up logic in the main <FormName>.cs file or via programmatically registered events.
+
 * **Separation of Concerns:** Keep code-behind clean. UI event handlers should strictly capture input and delegate business/data logic to independent service classes or controllers.
+
 * **Modern C# Usage:** Leverage .NET 8/9 paradigms: use file-scoped namespaces, pattern matching, and primary constructors where appropriate.
+
 * **High DPI and Fonts:** Ensure UI scaling compatibility by using modern application-wide settings in Program.cs (ApplicationConfiguration.Initialize()). Use layout panels (TableLayoutPanel, FlowLayoutPanel) instead of hardcoded coordinate bounds where possible to ensure smooth resizing.
 
 ### Asynchronous UI & Responsiveness
 
 * **Keep UI Responsive:** Always use async/await for long-running processes (I/O, database queries, network requests).
+
 * **Thread Safety:** Do not manipulate UI controls from a background thread. Always check InvokeRequired or use Invoke / BeginInvoke to marshal actions back to the main UI thread.
+
 * **Avoid Deadlocks:** Never call .Result or .Wait() on an async Task.
 
 ### Naming & Style Conventions

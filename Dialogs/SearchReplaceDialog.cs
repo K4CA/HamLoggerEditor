@@ -1,72 +1,101 @@
 using System.Data;
+using HamLoggerEditor.Services;
+using HamLoggerEditor.UI;
 
 namespace HamLoggerEditor.Dialogs;
 
+/// <summary>A column the user can search, in on-screen order.</summary>
+public sealed record SearchColumn(string Header, string Column, bool ReadOnly);
+
+/// <summary>What the Search and Replace window needs from the main window. Every member is called on the UI thread.</summary>
+public interface ISearchHost
+{
+    /// <summary>True while a background operation (load, save, search…) is running; the data must not be changed then.</summary>
+    bool IsBusy { get; }
+
+    IReadOnlyList<SearchColumn> GetSearchColumns();
+
+    /// <summary>The rows currently shown, in on-screen order, and the given columns.</summary>
+    SearchSnapshot CreateSnapshot(IReadOnlyList<string> columns);
+
+    /// <summary>The current cell: its on-screen row index, its DataRow and its DataTable column name.</summary>
+    (int RowIndex, DataRow? Row, string? Column) GetCurrentCell();
+
+    /// <summary>Selects and scrolls to a cell. Returns false when the row is no longer shown.</summary>
+    bool SelectCell(DataRow row, string column);
+
+    /// <summary>Starts a background operation and locks editing; null when another operation is running.</summary>
+    StatusOperation? BeginOperation(string caption);
+
+    /// <summary>Writes the values (bulk, one repaint) and marks the log as changed.</summary>
+    void ApplyChanges(IReadOnlyList<CellChange> changes, string description);
+}
+
 /// <summary>
-/// Modeless Find / Replace window for the contact grid. "Replace" changes one cell at a time;
-/// "Replace All" is only enabled when "Allow multiple replacements" is checked.
+/// Modeless Find / Replace window. Searching runs on a background thread over a snapshot of the rows,
+/// so the window and the grid stay responsive, with a progress bar and a Stop button for long logs.
+/// "Replace" changes one cell at a time; "Replace All" is enabled only when "Allow multiple replacements" is checked.
 /// </summary>
 public sealed class SearchReplaceDialog : Form
 {
     private const string AllColumns = "(All columns)";
 
-    private readonly DataGridView grid;
-    private readonly Action<string> report;
-    private readonly TextBox findBox = new();
-    private readonly TextBox replaceBox = new();
-    private readonly ComboBox columnBox = new();
-    private readonly CheckBox matchCase = new();
-    private readonly CheckBox wholeCell = new();
-    private readonly CheckBox allowMultiple = new();
-    private readonly Button replaceAllButton = new();
-    private readonly Label result = new();
-
-    public SearchReplaceDialog(DataGridView grid, Action<string> report)
+    private readonly ISearchHost _host;
+    private readonly TextBox _findTextBox = new() { Dock = DockStyle.Fill };
+    private readonly TextBox _replaceTextBox = new() { Dock = DockStyle.Fill };
+    private readonly ComboBox _columnComboBox = new() { Dock = DockStyle.Fill, DropDownStyle = ComboBoxStyle.DropDownList };
+    private readonly CheckBox _matchCaseCheckBox = new() { Text = "Match case", AutoSize = true };
+    private readonly CheckBox _wholeCellCheckBox = new() { Text = "Match entire cell contents", AutoSize = true };
+    private readonly CheckBox _allowMultipleCheckBox = new() { Text = "Allow multiple replacements (Replace All)", AutoSize = true };
+    private readonly Button _findNextButton = NewButton("Find Next");
+    private readonly Button _replaceButton = NewButton("Replace");
+    private readonly Button _replaceAllButton = NewButton("Replace All");
+    private readonly Button _findAllButton = NewButton("Find All");
+    private readonly Button _closeButton = NewButton("Close");
+    private readonly Button _stopButton = NewButton("Stop");
+    private readonly ProgressBar _searchProgressBar = new() { Dock = DockStyle.Fill, Height = 16, Visible = false };
+    private readonly Label _resultLabel = new() { Dock = DockStyle.Fill, AutoEllipsis = true, ForeColor = SystemColors.GrayText, TextAlign = ContentAlignment.MiddleLeft };
+    private readonly ListView _resultsListView = new()
     {
-        this.grid = grid;
-        this.report = report;
+        Dock = DockStyle.Fill, View = View.Details, FullRowSelect = true, MultiSelect = false,
+        HideSelection = false, Visible = false, MinimumSize = new Size(0, 120)
+    };
+
+    private StatusOperation? _operation;
+    private List<CellMatch> _findAllMatches = [];
+
+    public SearchReplaceDialog(ISearchHost host)
+    {
+        _host = host;
 
         Text = "Search and Replace";
-        FormBorderStyle = FormBorderStyle.FixedToolWindow;
+        FormBorderStyle = FormBorderStyle.SizableToolWindow;
         StartPosition = FormStartPosition.CenterParent;
         ShowInTaskbar = false;
-        ClientSize = new Size(470, 230);
+        AutoScaleMode = AutoScaleMode.Font;
+        ClientSize = new Size(520, 300);
+        MinimumSize = new Size(480, 320);
 
-        Controls.Add(new Label { Text = "Find what:", Left = 12, Top = 16, Width = 90 });
-        findBox.SetBounds(104, 12, 230, 23);
-        Controls.Add(new Label { Text = "Replace with:", Left = 12, Top = 48, Width = 90 });
-        replaceBox.SetBounds(104, 44, 230, 23);
-        Controls.Add(new Label { Text = "Look in:", Left = 12, Top = 80, Width = 90 });
-        columnBox.SetBounds(104, 76, 230, 23);
-        columnBox.DropDownStyle = ComboBoxStyle.DropDownList;
+        _resultsListView.Columns.Add("Row", 60, HorizontalAlignment.Right);
+        _resultsListView.Columns.Add("Column", 110);
+        _resultsListView.Columns.Add("Value", 300);
+        _resultsListView.ItemActivate += (_, _) => GoToSelectedResult();
+        _resultsListView.SelectedIndexChanged += (_, _) => GoToSelectedResult();
 
-        matchCase.Text = "Match case";
-        matchCase.SetBounds(104, 108, 230, 22);
-        wholeCell.Text = "Match entire cell contents";
-        wholeCell.SetBounds(104, 132, 230, 22);
-        allowMultiple.Text = "Allow multiple replacements (Replace All)";
-        allowMultiple.SetBounds(104, 156, 240, 22);
-        allowMultiple.CheckedChanged += (_, _) => replaceAllButton.Enabled = allowMultiple.Checked;
+        _replaceAllButton.Enabled = false;
+        _stopButton.Enabled = false;
+        _allowMultipleCheckBox.CheckedChanged += (_, _) => UpdateButtons();
 
-        result.SetBounds(12, 196, 330, 22);
-        result.ForeColor = SystemColors.GrayText;
+        _findNextButton.Click += async (_, _) => await RunSafelyAsync(() => FindNextAsync(beepIfMissing: true));
+        _replaceButton.Click += async (_, _) => await RunSafelyAsync(ReplaceCurrentAsync);
+        _replaceAllButton.Click += async (_, _) => await RunSafelyAsync(ReplaceAllAsync);
+        _findAllButton.Click += async (_, _) => await RunSafelyAsync(FindAllAsync);
+        _stopButton.Click += (_, _) => _operation?.Cancel();
+        _closeButton.Click += (_, _) => Hide();
 
-        var findNext = new Button { Text = "Find Next", Left = 350, Top = 11, Width = 108, Height = 26 };
-        var replace = new Button { Text = "Replace", Left = 350, Top = 43, Width = 108, Height = 26 };
-        replaceAllButton.Text = "Replace All";
-        replaceAllButton.SetBounds(350, 75, 108, 26);
-        replaceAllButton.Enabled = false;
-        var close = new Button { Text = "Close", Left = 350, Top = 192, Width = 108, Height = 26 };
-
-        findNext.Click += (_, _) => FindNext(showNotFound: true);
-        replace.Click += (_, _) => ReplaceCurrent();
-        replaceAllButton.Click += (_, _) => ReplaceAll();
-        close.Click += (_, _) => Hide();
-
-        Controls.AddRange([findBox, replaceBox, columnBox, matchCase, wholeCell, allowMultiple, result,
-            findNext, replace, replaceAllButton, close]);
-        AcceptButton = findNext;
-        CancelButton = close;
+        Controls.Add(BuildLayout());
+        AcceptButton = _findNextButton;
+        CancelButton = _closeButton;
 
         // Keep the window alive so the options are remembered; closing just hides it.
         FormClosing += (_, e) =>
@@ -76,143 +105,272 @@ public sealed class SearchReplaceDialog : Form
         VisibleChanged += (_, _) => { if (Visible) RefreshColumns(); };
     }
 
-    public void ShowFor(IWin32Window owner, string? initialFind)
+    public void ShowFor(IWin32Window owner)
     {
-        if (!string.IsNullOrEmpty(initialFind)) findBox.Text = initialFind;
         if (!Visible) Show(owner); else Activate();
-        findBox.Focus();
-        findBox.SelectAll();
+        _findTextBox.Focus();
+        _findTextBox.SelectAll();
+    }
+
+    private static Button NewButton(string text) =>
+        new() { Text = text, Dock = DockStyle.Fill, MinimumSize = new Size(100, 26), Margin = new Padding(6, 2, 0, 2) };
+
+    private TableLayoutPanel BuildLayout()
+    {
+        var layout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 3, Padding = new Padding(10), AutoSize = false };
+        layout.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        layout.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+
+        Label Caption(string text) => new() { Text = text, AutoSize = true, Anchor = AnchorStyles.Left, Margin = new Padding(0, 6, 6, 0) };
+
+        void AddRow(Control? first, Control? second, Control? third, SizeType sizeType = SizeType.AutoSize, float height = 0)
+        {
+            int row = layout.RowCount++;
+            layout.RowStyles.Add(new RowStyle(sizeType, height));
+            if (first is not null) layout.Controls.Add(first, 0, row);
+            if (second is not null) layout.Controls.Add(second, 1, row);
+            if (third is not null) layout.Controls.Add(third, 2, row);
+        }
+
+        AddRow(Caption("Find what:"), _findTextBox, _findNextButton);
+        AddRow(Caption("Replace with:"), _replaceTextBox, _replaceButton);
+        AddRow(Caption("Look in:"), _columnComboBox, _replaceAllButton);
+        AddRow(null, _matchCaseCheckBox, _findAllButton);
+        AddRow(null, _wholeCellCheckBox, _stopButton);
+        AddRow(null, _allowMultipleCheckBox, _closeButton);
+        AddRow(null, _searchProgressBar, null);
+        AddRow(_resultLabel, null, null, SizeType.Absolute, 24);
+        layout.SetColumnSpan(_resultLabel, 3);
+        AddRow(_resultsListView, null, null, SizeType.Percent, 100);
+        layout.SetColumnSpan(_resultsListView, 3);
+        return layout;
     }
 
     private void RefreshColumns()
     {
-        string? selected = columnBox.SelectedItem as string;
-        columnBox.Items.Clear();
-        columnBox.Items.Add(AllColumns);
-        foreach (DataGridViewColumn c in OrderedColumns()) columnBox.Items.Add(c.HeaderText);
-        columnBox.SelectedItem = selected is not null && columnBox.Items.Contains(selected) ? selected : AllColumns;
+        string? selected = _columnComboBox.SelectedItem as string;
+        _columnComboBox.Items.Clear();
+        _columnComboBox.Items.Add(AllColumns);
+        foreach (SearchColumn column in _host.GetSearchColumns()) _columnComboBox.Items.Add(column.Header);
+        _columnComboBox.SelectedItem = selected is not null && _columnComboBox.Items.Contains(selected) ? selected : AllColumns;
     }
 
-    private List<DataGridViewColumn> OrderedColumns() =>
-        grid.Columns.Cast<DataGridViewColumn>()
-            .Where(c => c.Visible && !string.IsNullOrEmpty(c.DataPropertyName))
-            .OrderBy(c => c.DisplayIndex).ToList();
-
-    private List<DataGridViewColumn> SearchColumns()
+    private List<SearchColumn> SelectedColumns(bool writableOnly)
     {
-        var columns = OrderedColumns();
-        return columnBox.SelectedItem is string header && header != AllColumns
-            ? columns.Where(c => c.HeaderText == header).ToList()
+        var columns = _host.GetSearchColumns().Where(c => !writableOnly || !c.ReadOnly).ToList();
+        return _columnComboBox.SelectedItem is string header && header != AllColumns
+            ? columns.Where(c => c.Header == header).ToList()
             : columns;
     }
 
-    private StringComparison Comparison => matchCase.Checked ? StringComparison.Ordinal : StringComparison.OrdinalIgnoreCase;
-
-    private bool IsMatch(string value, string find) =>
-        wholeCell.Checked ? value.Trim().Equals(find, Comparison) : value.Contains(find, Comparison);
-
-    private string ReplaceIn(string value, string find, string replacement) =>
-        wholeCell.Checked ? replacement : value.Replace(find, replacement, Comparison);
-
-    private static string CellText(DataGridViewRow row, DataGridViewColumn column) =>
-        row.DataBoundItem is DataRowView drv && drv.Row[column.DataPropertyName] is string s ? s : string.Empty;
-
-    private bool ValidateFind(out string find)
+    private bool TryGetOptions(out SearchOptions options)
     {
-        find = findBox.Text;
-        if (find.Length > 0) return true;
-        result.Text = "Enter the text to find.";
-        findBox.Focus();
+        options = new SearchOptions(_findTextBox.Text, _replaceTextBox.Text, _matchCaseCheckBox.Checked, _wholeCellCheckBox.Checked);
+        if (options.Find.Length > 0) return true;
+        _resultLabel.Text = "Enter the text to find.";
+        _findTextBox.Focus();
         return false;
     }
 
-    private bool FindNext(bool showNotFound)
+    // ---- background operation plumbing ------------------------------------------------------
+
+    private async Task RunSafelyAsync(Func<Task> action)
     {
-        if (!ValidateFind(out string find)) return false;
-        grid.EndEdit();
-        var columns = SearchColumns();
-        int rowCount = grid.Rows.Count;
-        if (rowCount == 0 || columns.Count == 0) { result.Text = "Nothing to search."; return false; }
-
-        int startRow = grid.CurrentCell?.RowIndex ?? 0;
-        int startCol = grid.CurrentCell is null ? -1 : columns.FindIndex(c => c.Index == grid.CurrentCell.ColumnIndex);
-        if (startRow < 0) startRow = 0;
-
-        int total = rowCount * columns.Count;
-        int startPos = startRow * columns.Count + startCol; // position of the current cell (-1 = before first)
-        for (int step = 1; step <= total; step++)
+        if (_host.IsBusy)
         {
-            int pos = ((startPos + step) % total + total) % total;
-            DataGridViewRow row = grid.Rows[pos / columns.Count];
-            DataGridViewColumn column = columns[pos % columns.Count];
-            if (!IsMatch(CellText(row, column), find)) continue;
+            _resultLabel.Text = "Another operation is running. Try again when it finishes.";
+            return;
+        }
+        try { await action(); }
+        catch (Exception ex)
+        {
+            MessageBox.Show(this, ex.Message, Text, MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
+    }
 
-            grid.ClearSelection();
-            grid.CurrentCell = row.Cells[column.Index];
-            row.Selected = true;
-            result.Text = $"Found in row {row.Index + 1:N0}, column {column.HeaderText}.";
-            return true;
+    /// <summary>Runs <paramref name="work"/> on a background thread with progress in this window and the status bar.</summary>
+    private async Task<(bool Completed, T? Result)> RunInBackgroundAsync<T>(string caption, Func<IProgress<int>, CancellationToken, T> work)
+    {
+        StatusOperation? operation = _host.BeginOperation(caption);
+        if (operation is null)
+        {
+            _resultLabel.Text = "Another operation is running. Try again when it finishes.";
+            return (false, default);
         }
 
-        result.Text = $"\"{find}\" was not found.";
-        if (showNotFound) System.Media.SystemSounds.Beep.Play();
-        return false;
+        _operation = operation;
+        SetBusy(true);
+        var progress = new Progress<int>(percent =>
+        {
+            _searchProgressBar.Value = Math.Clamp(percent, 0, 100);
+            operation.Progress.Report(percent);
+        });
+        try
+        {
+            T result = await Task.Run(() => work(progress, operation.Token), operation.Token);
+            return (true, result);
+        }
+        catch (OperationCanceledException)
+        {
+            _resultLabel.Text = "Search stopped.";
+            return (false, default);
+        }
+        finally
+        {
+            _operation = null;
+            operation.Dispose();
+            SetBusy(false);
+        }
     }
 
-    private void ReplaceCurrent()
+    private void SetBusy(bool busy)
     {
-        if (!ValidateFind(out string find)) return;
-        grid.EndEdit();
-        DataGridViewCell? cell = grid.CurrentCell;
-        var columns = SearchColumns();
-        bool currentIsCandidate = cell is not null && columns.Any(c => c.Index == cell.ColumnIndex);
+        _searchProgressBar.Value = 0;
+        _searchProgressBar.Visible = busy;
+        _stopButton.Enabled = busy;
+        _findNextButton.Enabled = _replaceButton.Enabled = _findAllButton.Enabled = !busy;
+        UseWaitCursor = busy;
+        UpdateButtons();
+    }
 
-        if (currentIsCandidate && cell!.OwningRow.DataBoundItem is DataRowView drv)
+    private void UpdateButtons() => _replaceAllButton.Enabled = _operation is null && _allowMultipleCheckBox.Checked;
+
+    // ---- commands -----------------------------------------------------------------------------
+
+    private async Task<bool> FindNextAsync(bool beepIfMissing)
+    {
+        if (!TryGetOptions(out SearchOptions options)) return false;
+        var columns = SelectedColumns(writableOnly: false).Select(c => c.Column).ToList();
+        SearchSnapshot snapshot = _host.CreateSnapshot(columns);
+        if (snapshot.CellCount == 0)
         {
-            DataGridViewColumn column = grid.Columns[cell.ColumnIndex];
-            string text = CellText(cell.OwningRow, column);
-            if (!column.ReadOnly && IsMatch(text, find))
+            _resultLabel.Text = "Nothing to search.";
+            return false;
+        }
+
+        // Start just after the current cell (or at the start of its row if it's in a column not searched).
+        var (rowIndex, _, currentColumn) = _host.GetCurrentCell();
+        long start = -1;
+        if (rowIndex >= 0 && rowIndex < snapshot.Rows.Count)
+        {
+            int columnIndex = currentColumn is null ? -1 : columns.IndexOf(currentColumn);
+            start = (long)rowIndex * columns.Count + columnIndex;
+        }
+
+        _resultLabel.Text = "Searching…";
+        var (completed, match) = await RunInBackgroundAsync("Searching",
+            (progress, token) => GridSearchService.FindNext(snapshot, start, options, progress, token));
+        if (!completed) return false;
+
+        if (match is null)
+        {
+            _resultLabel.Text = $"\"{options.Find}\" was not found.";
+            if (beepIfMissing) System.Media.SystemSounds.Beep.Play();
+            return false;
+        }
+        if (!_host.SelectCell(match.Row, match.Column))
+        {
+            _resultLabel.Text = "The match is no longer shown in the grid. Search again.";
+            return false;
+        }
+        _resultLabel.Text = $"Found in row {match.RowIndex + 1:N0}, column {HeaderFor(match.Column)}.";
+        return true;
+    }
+
+    private async Task ReplaceCurrentAsync()
+    {
+        if (!TryGetOptions(out SearchOptions options)) return;
+        var (_, row, column) = _host.GetCurrentCell();
+        var writable = SelectedColumns(writableOnly: true);
+
+        if (row is not null && column is not null && writable.Any(c => c.Column == column))
+        {
+            string text = GridSearchService.CellText(row, column);
+            if (GridSearchService.IsMatch(text, options))
             {
-                drv.Row[column.DataPropertyName] = ReplaceIn(text, find, replaceBox.Text);
-                report("Replaced 1 value");
+                _host.ApplyChanges([new CellChange(row, column, GridSearchService.ReplaceIn(text, options))], "Replaced 1 value");
                 // Move on to the next match so repeated clicks walk through the log one cell at a time.
-                if (!FindNext(showNotFound: false)) result.Text = "Replaced. No more matches.";
-                else result.Text = "Replaced. " + result.Text;
+                bool more = await FindNextAsync(beepIfMissing: false);
+                _resultLabel.Text = more ? "Replaced. " + _resultLabel.Text : "Replaced. No more matches.";
                 return;
             }
         }
-        FindNext(showNotFound: true);
+        await FindNextAsync(beepIfMissing: true);
     }
 
-    private void ReplaceAll()
+    private async Task ReplaceAllAsync()
     {
-        if (!allowMultiple.Checked || !ValidateFind(out string find)) return;
-        grid.EndEdit();
+        if (!_allowMultipleCheckBox.Checked || !TryGetOptions(out SearchOptions options)) return;
+        var columns = SelectedColumns(writableOnly: true).Select(c => c.Column).ToList();
+        SearchSnapshot snapshot = _host.CreateSnapshot(columns);
 
-        // Collect first: editing a sorted column would reorder the rows while we walk them.
-        var targets = new List<(DataRow Row, string Column, string Value)>();
-        var columns = SearchColumns().Where(c => !c.ReadOnly).ToList();
-        foreach (DataGridViewRow row in grid.Rows)
-        {
-            if (row.DataBoundItem is not DataRowView drv) continue;
-            foreach (DataGridViewColumn column in columns)
-            {
-                string text = CellText(row, column);
-                if (IsMatch(text, find))
-                    targets.Add((drv.Row, column.DataPropertyName, ReplaceIn(text, find, replaceBox.Text)));
-            }
-        }
+        _resultLabel.Text = "Finding values to replace…";
+        var (completed, changes) = await RunInBackgroundAsync("Preparing Replace All",
+            (progress, token) => GridSearchService.PlanReplaceAll(snapshot, options, progress, token));
+        if (!completed || changes is null) return;
 
-        if (targets.Count == 0)
+        if (changes.Count == 0)
         {
-            result.Text = $"\"{find}\" was not found.";
+            _resultLabel.Text = $"\"{options.Find}\" was not found.";
             return;
         }
-        if (MessageBox.Show(this, $"Replace \"{find}\" in {targets.Count:N0} cell(s)?", Text,
-                MessageBoxButtons.OKCancel, MessageBoxIcon.Question) != DialogResult.OK) return;
+        if (MessageBox.Show(this, $"Replace \"{options.Find}\" in {changes.Count:N0} cell(s)?", Text,
+                MessageBoxButtons.OKCancel, MessageBoxIcon.Question) != DialogResult.OK)
+        {
+            _resultLabel.Text = "Replace All cancelled.";
+            return;
+        }
 
-        foreach (var (row, column, value) in targets) row[column] = value;
-        result.Text = $"Replaced {targets.Count:N0} cell(s).";
-        report($"Replaced {targets.Count:N0} value(s)");
+        _host.ApplyChanges(changes, $"Replaced {changes.Count:N0} value(s)");
+        _resultLabel.Text = $"Replaced {changes.Count:N0} cell(s).";
     }
+
+    private async Task FindAllAsync()
+    {
+        if (!TryGetOptions(out SearchOptions options)) return;
+        var columns = SelectedColumns(writableOnly: false).Select(c => c.Column).ToList();
+        SearchSnapshot snapshot = _host.CreateSnapshot(columns);
+
+        _resultLabel.Text = "Searching…";
+        var (completed, result) = await RunInBackgroundAsync("Finding all",
+            (progress, token) => GridSearchService.FindAll(snapshot, options, progress, token));
+        if (!completed) return;
+
+        _findAllMatches = result.Matches;
+        var headers = _host.GetSearchColumns().ToDictionary(c => c.Column, c => c.Header);
+        _resultsListView.BeginUpdate();
+        _resultsListView.Items.Clear();
+        _resultsListView.Items.AddRange(_findAllMatches.Select(m => new ListViewItem(
+        [
+            (m.RowIndex + 1).ToString("N0"),
+            headers.TryGetValue(m.Column, out string? h) ? h : m.Column,
+            m.Value.ReplaceLineEndings(" ")
+        ])).ToArray());
+        _resultsListView.EndUpdate();
+
+        if (!_resultsListView.Visible)
+        {
+            _resultsListView.Visible = true;
+            if (ClientSize.Height < 420) ClientSize = new Size(ClientSize.Width, 420);
+        }
+        _resultLabel.Text = result.Matches.Count == 0
+            ? $"\"{options.Find}\" was not found."
+            : result.Truncated
+                ? $"Showing the first {result.Matches.Count:N0} matches. Narrow the search to see the rest."
+                : $"{result.Matches.Count:N0} match(es). Click one to go to it.";
+    }
+
+    private void GoToSelectedResult()
+    {
+        if (_resultsListView.SelectedIndices.Count == 0) return;
+        int index = _resultsListView.SelectedIndices[0];
+        if (index < 0 || index >= _findAllMatches.Count) return;
+        CellMatch match = _findAllMatches[index];
+        if (!_host.SelectCell(match.Row, match.Column))
+            _resultLabel.Text = "That row is no longer shown (deleted or filtered out).";
+    }
+
+    private string HeaderFor(string column) =>
+        _host.GetSearchColumns().FirstOrDefault(c => c.Column == column)?.Header ?? column;
 }
