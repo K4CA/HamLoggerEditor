@@ -5,5 +5,12 @@
     <UseWindowsForms>true</UseWindowsForms>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
+    <!-- Icon for the .exe in Explorer and the taskbar, and for .adi files once associated. -->
+    <ApplicationIcon>Assets\HamLoggerEditor.ico</ApplicationIcon>
   </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Embedded as well, so MainForm can show the same icon in its title bar (see UI/AppIcon.cs). -->
+    <EmbeddedResource Include="Assets\HamLoggerEditor.ico" />
+  </ItemGroup>
 </Project>

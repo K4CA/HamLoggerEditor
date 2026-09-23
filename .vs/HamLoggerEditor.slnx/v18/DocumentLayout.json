@@ -3,12 +3,12 @@
   "WorkspaceRootPath": "C:\\Users\\davet\\source\\repos\\HamLoggerEditor\\",
   "Documents": [
     {
-      "AbsoluteMoniker": "D:0:0:{FEDD0FC1-C77E-5B69-A30A-FCBA7AC859AD}|HamLoggerEditor.csproj|c:\\users\\davet\\source\\repos\\hamloggereditor\\readme.md||{EFC0BB08-EA7D-40C6-A696-C870411A895B}",
-      "RelativeMoniker": "D:0:0:{FEDD0FC1-C77E-5B69-A30A-FCBA7AC859AD}|HamLoggerEditor.csproj|solutionrelative:readme.md||{EFC0BB08-EA7D-40C6-A696-C870411A895B}"
-    },
-    {
       "AbsoluteMoniker": "D:0:0:{FEDD0FC1-C77E-5B69-A30A-FCBA7AC859AD}|HamLoggerEditor.csproj|c:\\users\\davet\\source\\repos\\hamloggereditor\\mainform.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}",
       "RelativeMoniker": "D:0:0:{FEDD0FC1-C77E-5B69-A30A-FCBA7AC859AD}|HamLoggerEditor.csproj|solutionrelative:mainform.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}"
+    },
+    {
+      "AbsoluteMoniker": "D:0:0:{FEDD0FC1-C77E-5B69-A30A-FCBA7AC859AD}|HamLoggerEditor.csproj|c:\\users\\davet\\source\\repos\\hamloggereditor\\readme.md||{EFC0BB08-EA7D-40C6-A696-C870411A895B}",
+      "RelativeMoniker": "D:0:0:{FEDD0FC1-C77E-5B69-A30A-FCBA7AC859AD}|HamLoggerEditor.csproj|solutionrelative:readme.md||{EFC0BB08-EA7D-40C6-A696-C870411A895B}"
     },
     {
       "AbsoluteMoniker": "D:0:0:{FEDD0FC1-C77E-5B69-A30A-FCBA7AC859AD}|HamLoggerEditor.csproj|c:\\users\\davet\\source\\repos\\hamloggereditor\\adif\\adiffile.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}",
@@ -26,7 +26,7 @@
       "DocumentGroups": [
         {
           "DockedWidth": 339,
-          "SelectedChildIndex": 5,
+          "SelectedChildIndex": 6,
           "Children": [
             {
               "$type": "Bookmark",
@@ -66,28 +66,28 @@
             },
             {
               "$type": "Document",
-              "DocumentIndex": 0,
+              "DocumentIndex": 1,
               "Title": "README.md",
               "DocumentMoniker": "C:\\Users\\davet\\source\\repos\\HamLoggerEditor\\README.md",
               "RelativeDocumentMoniker": "README.md",
               "ToolTip": "C:\\Users\\davet\\source\\repos\\HamLoggerEditor\\README.md",
               "RelativeToolTip": "README.md",
-              "ViewState": "AgIAACEAAAAAAAAAAAAAAD8AAAAAAAAAAAAAAA==",
+              "ViewState": "AgIAAAAAAAAAAAAAAAAAAAYAAAA8AQAAAAAAAA==",
               "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.001818|",
-              "WhenOpened": "2026-09-16T16:44:04.188Z",
-              "EditorCaption": ""
+              "WhenOpened": "2026-09-16T16:44:04.188Z"
             },
             {
               "$type": "Document",
-              "DocumentIndex": 1,
+              "DocumentIndex": 0,
               "Title": "MainForm.cs",
               "DocumentMoniker": "C:\\Users\\davet\\source\\repos\\HamLoggerEditor\\MainForm.cs",
               "RelativeDocumentMoniker": "MainForm.cs",
               "ToolTip": "C:\\Users\\davet\\source\\repos\\HamLoggerEditor\\MainForm.cs",
               "RelativeToolTip": "MainForm.cs",
-              "ViewState": "AgIAAAAAAAAAAAAAAAAAAAgAAAAAAAAAAAAAAA==",
+              "ViewState": "AgIAAAAAAAAAAAAAAAAAAAMAAAAeAAAAAAAAAA==",
               "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.000738|",
-              "WhenOpened": "2026-09-16T16:43:24.833Z"
+              "WhenOpened": "2026-09-16T16:43:24.833Z",
+              "EditorCaption": ""
             }
           ]
         },

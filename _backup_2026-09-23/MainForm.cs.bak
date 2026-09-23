@@ -11,7 +11,7 @@ namespace HamLoggerEditor;
 
 public sealed class MainForm : Form, ISearchHost
 {
-    private const string AppTitle = "HamLogger Contact Editor  Version 1.3";
+    private const string AppTitle = "HamLogger Contact Editor  Version 1.2";
 
     // Internal (never saved) columns. ADIF field names cannot start with an underscore.
     private const string SourceColumn = "__SOURCE_FILE";
@@ -45,11 +45,6 @@ public sealed class MainForm : Form, ISearchHost
     private readonly MenuStrip _mainMenuStrip;
     private readonly ToolStrip _mainToolStrip;
     private readonly StatusProgress _statusProgress;
-    private readonly RecentFilesService _recentFiles = new();
-    private readonly ToolStripMenuItem _recentFilesItem = new("Recent &Files");
-    private readonly ToolStripMenuItem _associateItem = new("Open .adi Files With This Program") { CheckOnClick = false };
-    private readonly MainWindowContext? _windowContext;
-    private readonly string? _initialPath;
     private bool _closeConfirmed;
 
     private DataTable table = new();
@@ -59,16 +54,9 @@ public sealed class MainForm : Form, ISearchHost
     private bool suppressEvents;
     private DataGridViewColumn? headerMenuColumn;
 
-    public MainForm() : this(null, null) { }
-
-    /// <param name="windowContext">Owner of all editor windows; null means this window stands alone.</param>
-    /// <param name="initialPath">An ADIF file to load once the window is shown (Explorer double-click).</param>
-    public MainForm(MainWindowContext? windowContext, string? initialPath)
+    public MainForm()
     {
-        _windowContext = windowContext;
-        _initialPath = initialPath;
         Text = AppTitle;
-        Icon = AppIcon.Value;
         StartPosition = FormStartPosition.CenterScreen;
         Width = 1450;
         Height = 750;
@@ -99,12 +87,6 @@ public sealed class MainForm : Form, ISearchHost
         typeof(DataGridView).GetProperty("DoubleBuffered",
             System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)?.SetValue(grid, true);
 
-        // Dropping a log file on the grid opens it; hold Shift to merge it into the open log instead.
-        grid.AllowDrop = true;
-        grid.DragEnter += Grid_DragEnter;
-        grid.DragOver += Grid_DragEnter;   // the effect must be set for every DragOver, not just on entry
-        grid.DragDrop += Grid_DragDrop;
-
         Controls.Add(grid);
         Controls.Add(toolBar);
         Controls.Add(menu);
@@ -116,17 +98,6 @@ public sealed class MainForm : Form, ISearchHost
         LoadTable(CreateTable(DefaultFields), autoSize: false);
         UpdateTitle();
         UpdateStatus("Ready");
-
-        if (_initialPath is not null)
-        {
-            // Load the file Explorer passed us once the window is on screen (so progress is visible).
-            void LoadInitialFile(object? sender, EventArgs e)
-            {
-                Shown -= LoadInitialFile;
-                RunCommand(() => OpenPathAsync(_initialPath));
-            }
-            Shown += LoadInitialFile;
-        }
     }
 
     #region UI construction
@@ -139,7 +110,6 @@ public sealed class MainForm : Form, ISearchHost
         file.DropDownItems.Add(Item("&New", Keys.Control | Keys.N, NewFileAsync));
         file.DropDownItems.Add(Item("&Open ADIF...", Keys.Control | Keys.O, OpenFileAsync));
         file.DropDownItems.Add(Item("&Merge ADIF File...", Keys.Control | Keys.M, MergeFileAsync));
-        file.DropDownItems.Add(Item("New &Window", Keys.Control | Keys.Shift | Keys.N, OpenNewWindow));
         file.DropDownItems.Add(new ToolStripSeparator());
         file.DropDownItems.Add(Item("&Save", Keys.Control | Keys.S, () => SaveFileAsync(false)));
         file.DropDownItems.Add(Item("Save &As...", Keys.Control | Keys.Shift | Keys.S, () => SaveFileAsync(true)));
@@ -151,20 +121,7 @@ public sealed class MainForm : Form, ISearchHost
         export.DropDownItems.Add(Item("SQL &Server INSERT Script...", Keys.None, () => ExportSqlAsync(SqlDialect.SqlServer)));
         file.DropDownItems.Add(export);
         file.DropDownItems.Add(new ToolStripSeparator());
-        file.DropDownItems.Add(_recentFilesItem);
-        _associateItem.Click += (_, _) => RunCommand(ToggleFileAssociation);
-        file.DropDownItems.Add(_associateItem);
-        file.DropDownItems.Add(new ToolStripSeparator());
         file.DropDownItems.Add(Item("E&xit", Keys.None, Close));
-        file.DropDownOpening += (_, _) =>
-        {
-            BuildRecentFilesMenu();
-            bool registered = FileAssociationService.IsRegistered();
-            _associateItem.Checked = registered;
-            _associateItem.Text = registered
-                ? "Stop Opening .adi Files With This Program"
-                : "Open .adi Files With This Program";
-        };
 
         var edit = new ToolStripMenuItem("&Edit");
         edit.DropDownItems.Add(Item("&Add Contact", Keys.Control | Keys.Insert, AddContact));
@@ -574,7 +531,6 @@ public sealed class MainForm : Form, ISearchHost
             LoadTable(loaded.Table, autoSize: true);
             currentPath = path;
             dirty = mergedSinceSave = false;
-            _recentFiles.Add(path);
             UpdateTitle();
             UpdateStatus($"Loaded {loaded.Table.Rows.Count:N0} contacts with {loaded.FieldCount} fields from {Path.GetFileName(path)} in {Took(operation)}");
         }
@@ -633,27 +589,22 @@ public sealed class MainForm : Form, ISearchHost
             Title = "Merge ADIF File"
         };
         if (dialog.ShowDialog(this) != DialogResult.OK) return;
-        await MergePathAsync(dialog.FileName);
-    }
 
-    /// <summary>Merges one ADIF file into the open log (used by File &gt; Merge and by dropped files).</summary>
-    private async Task MergePathAsync(string path)
-    {
         // Nothing loaded yet: this is the first file, so its field names define the columns.
         if (table.Rows.Count == 0 && !dirty)
         {
-            await OpenPathAsync(path);
+            await OpenPathAsync(dialog.FileName);
             return;
         }
 
-        string fileName = Path.GetFileName(path);
+        string fileName = Path.GetFileName(dialog.FileName);
         AdifLog log;
         using (StatusOperation? reading = BeginOperation($"Reading {fileName}"))
         {
             if (reading is null) return;
             try
             {
-                log = await Task.Run(() => AdifFile.Load(path, reading.Progress, reading.Token), reading.Token);
+                log = await Task.Run(() => AdifFile.Load(dialog.FileName, reading.Progress, reading.Token), reading.Token);
             }
             catch (OperationCanceledException)
             {
@@ -804,7 +755,6 @@ public sealed class MainForm : Form, ISearchHost
 
         currentPath = path;
         dirty = mergedSinceSave = false;
-        _recentFiles.Add(path);
         UpdateTitle();
         return true;
     }
@@ -961,116 +911,6 @@ public sealed class MainForm : Form, ISearchHost
             _closeConfirmed = true;
             Close();
         });
-    }
-
-    #endregion
-
-    #region Opening files from Explorer, drops and the recent list
-
-    private void OpenNewWindow()
-    {
-        if (_windowContext is null)
-        {
-            MessageBox.Show(this, "Extra windows are not available in this session.", AppTitle,
-                MessageBoxButtons.OK, MessageBoxIcon.Information);
-            return;
-        }
-        _windowContext.OpenWindow();
-    }
-
-    private void BuildRecentFilesMenu()
-    {
-        _recentFilesItem.DropDownItems.Clear();
-        if (_recentFiles.Items.Count == 0)
-        {
-            _recentFilesItem.DropDownItems.Add(new ToolStripMenuItem("(none yet)") { Enabled = false });
-            return;
-        }
-        int number = 1;
-        foreach (string path in _recentFiles.Items)
-        {
-            string caption = $"&{number++} {Path.GetFileName(path)}";
-            var item = new ToolStripMenuItem(caption) { ToolTipText = path };
-            string captured = path;
-            item.Click += (_, _) => RunCommand(() => OpenRecentAsync(captured));
-            _recentFilesItem.DropDownItems.Add(item);
-        }
-        _recentFilesItem.DropDownItems.Add(new ToolStripSeparator());
-        _recentFilesItem.DropDownItems.Add(new ToolStripMenuItem("&Clear List", null, (_, _) => RunCommand(() =>
-        {
-            _recentFiles.Clear();
-            UpdateStatus("Recent file list cleared");
-        })));
-    }
-
-    private async Task OpenRecentAsync(string path)
-    {
-        if (!File.Exists(path))
-        {
-            if (MessageBox.Show(this, $"{path}\n\nThat file is no longer there. Remove it from the recent list?",
-                    "Recent Files", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) == DialogResult.Yes)
-                _recentFiles.Remove(path);
-            return;
-        }
-        if (!await ConfirmDiscardAsync()) return;
-        await OpenPathAsync(path);
-    }
-
-    private void Grid_DragEnter(object? sender, DragEventArgs e)
-    {
-        e.Effect = DroppedLogFiles(e).Count > 0 && !_statusProgress.IsBusy
-            ? IsShiftHeld(e) ? DragDropEffects.Link : DragDropEffects.Copy
-            : DragDropEffects.None;
-    }
-
-    private void Grid_DragDrop(object? sender, DragEventArgs e)
-    {
-        var paths = DroppedLogFiles(e);
-        if (paths.Count == 0) return;
-        bool mergeFirst = IsShiftHeld(e);
-        RunCommand(() => OpenDroppedFilesAsync(paths, mergeFirst));
-    }
-
-    private static bool IsShiftHeld(DragEventArgs e) => (e.KeyState & 4) == 4;
-
-    /// <summary>The .adi / .adif files in a drag, ignoring anything else that was dropped.</summary>
-    private static List<string> DroppedLogFiles(DragEventArgs e) =>
-        e.Data?.GetData(DataFormats.FileDrop) is string[] files
-            ? files.Where(f => File.Exists(f) && FileAssociationService.IsSupportedFile(f)).ToList()
-            : [];
-
-    /// <summary>Opens the first dropped file (or merges it when Shift is held); any others are merged.</summary>
-    private async Task OpenDroppedFilesAsync(IReadOnlyList<string> paths, bool mergeFirst)
-    {
-        Activate();
-        for (int i = 0; i < paths.Count; i++)
-        {
-            bool merge = mergeFirst || i > 0;
-            if (merge) await MergePathAsync(paths[i]);
-            else
-            {
-                if (!await ConfirmDiscardAsync()) return;
-                await OpenPathAsync(paths[i]);
-            }
-        }
-    }
-
-    private void ToggleFileAssociation()
-    {
-        if (FileAssociationService.IsRegistered())
-        {
-            FileAssociationService.Unregister();
-            UpdateStatus("This program no longer opens .adi files by double-click");
-            return;
-        }
-        FileAssociationService.Register();
-        UpdateStatus("Double-clicking an .adi file now opens this program");
-        MessageBox.Show(this,
-            "Windows will now open .adi and .adif files with this program.\n\n" +
-            "If double-clicking still opens a different program, that means Windows is remembering an " +
-            "earlier choice: right-click the file, pick \"Open with\" > \"Choose another app\", select " +
-            "HamLogger Contact Editor and tick \"Always use this app\".",
-            "Open .adi Files With This Program", MessageBoxButtons.OK, MessageBoxIcon.Information);
     }
 
     #endregion
