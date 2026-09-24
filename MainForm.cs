@@ -139,6 +139,7 @@ public sealed class MainForm : Form, ISearchHost
         file.DropDownItems.Add(Item("&New", Keys.Control | Keys.N, NewFileAsync));
         file.DropDownItems.Add(Item("&Open ADIF...", Keys.Control | Keys.O, OpenFileAsync));
         file.DropDownItems.Add(Item("&Merge ADIF File...", Keys.Control | Keys.M, MergeFileAsync));
+        file.DropDownItems.Add(Item("&Update...", Keys.Control | Keys.U, UpdateFileAsync));
         file.DropDownItems.Add(Item("New &Window", Keys.Control | Keys.Shift | Keys.N, OpenNewWindow));
         file.DropDownItems.Add(new ToolStripSeparator());
         file.DropDownItems.Add(Item("&Save", Keys.Control | Keys.S, () => SaveFileAsync(false)));
@@ -207,6 +208,7 @@ public sealed class MainForm : Form, ISearchHost
         var bar = new ToolStrip { GripStyle = ToolStripGripStyle.Hidden, Dock = DockStyle.Top };
         bar.Items.Add(Button("Open ADIF", "Open an ADIF file; its field names become the columns", OpenFileAsync));
         bar.Items.Add(Button("Merge File", "Add the rows of another ADIF file (tagged with its file name)", MergeFileAsync));
+        bar.Items.Add(Button("Update", "Overwrite matching contacts from another ADIF file, and add contacts that are not already in the log (same QSO_DATE, TIME_ON, CALL, BAND and MODE).", UpdateFileAsync));
         bar.Items.Add(Button("Save ADIF", "Save all rows", () => SaveFileAsync(false)));
         bar.Items.Add(Button("Save Selected", "Save only the selected rows to a new ADIF file", SaveSelectedRowsAsync));
         bar.Items.Add(new ToolStripSeparator());
@@ -732,6 +734,201 @@ public sealed class MainForm : Form, ISearchHost
     }
 
     private sealed record MergeResult(int RowsAdded);
+
+    private static readonly string[] ContactKeyNames = ["QSO_DATE", "TIME_ON", "CALL", "BAND", "MODE"];
+
+    private async Task UpdateFileAsync()
+    {
+        var keyColumns = ContactKeyNames.Select(FindColumn).ToList();
+        var missing = ContactKeyNames.Where((_, i) => keyColumns[i] is null).ToList();
+        if (missing.Count > 0)
+        {
+            MessageBox.Show(this, $"Update needs these columns: {string.Join(", ", missing)}.", "Update",
+                MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+        using var dialog = new OpenFileDialog
+        {
+            Filter = "ADIF files (*.adi;*.adif)|*.adi;*.adif|All files (*.*)|*.*",
+            Title = "Update from ADIF File"
+        };
+        if (dialog.ShowDialog(this) != DialogResult.OK) return;
+        await UpdatePathAsync(dialog.FileName, keyColumns!);
+    }
+
+    /// <summary>
+    /// Writes fields from an ADIF file onto existing rows that share QSO_DATE, TIME_ON, CALL, BAND and MODE.
+    /// A record with no match is added. A record that matches more than one open row is skipped.
+    /// </summary>
+    private async Task UpdatePathAsync(string path, IReadOnlyList<DataColumn> keyColumns)
+    {
+        string fileName = Path.GetFileName(path);
+        AdifLog log;
+        using (StatusOperation? reading = BeginOperation($"Reading {fileName}"))
+        {
+            if (reading is null) return;
+            try
+            {
+                log = await Task.Run(() => AdifFile.Load(path, reading.Progress, reading.Token), reading.Token);
+            }
+            catch (OperationCanceledException)
+            {
+                UpdateStatus("Update cancelled; nothing was changed");
+                return;
+            }
+            catch (Exception ex)
+            {
+                ShowError("Unable to open ADIF", ex);
+                return;
+            }
+        }
+
+        var fieldMap = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        var newColumns = new List<string>();
+        foreach (string field in log.FieldNames.Where(f => !IgnoredFields.Contains(f)))
+        {
+            DataColumn? column = FindColumn(field);
+            if (column is not null)
+            {
+                fieldMap[field] = column.ColumnName;
+                continue;
+            }
+            string name = field.ToUpperInvariant();
+            if (!newColumns.Contains(name, StringComparer.OrdinalIgnoreCase)) newColumns.Add(name);
+            fieldMap[field] = name;
+        }
+
+        using StatusOperation? operation = BeginOperation($"Updating from {fileName}");
+        if (operation is null) return;
+
+        var layout = CurrentLayout();
+        layout.AddRange(newColumns.Select(n => new ColumnSpec(n, n, 100)));
+        string[] keyNames = keyColumns.Select(c => c.ColumnName).ToArray();
+        GridState state = UnbindGrid(keepSortAndFilter: true);
+        UpdateResult? result = null;
+        try
+        {
+            DataTable target = table;
+            result = await Task.Run(() => UpdateRecords(target, log, fieldMap, newColumns, keyNames,
+                operation.Progress, operation.Token), operation.Token);
+        }
+        catch (OperationCanceledException)
+        {
+            UpdateStatus("Update cancelled; nothing was changed");
+        }
+        catch (Exception ex)
+        {
+            ShowError("Unable to update from ADIF", ex);
+        }
+        finally
+        {
+            RebindGrid(layout.Where(s => table.Columns.Contains(s.Key ?? s.Name)).ToList(), state);
+        }
+
+        if (result is null) return;
+        if (result.RowsUpdated > 0 || result.RowsAdded > 0 || result.ColumnsAdded > 0) MarkDirty();
+        UpdateStatus(
+            $"Updated {result.RowsUpdated:N0} contact(s) from {fileName}; added {result.RowsAdded:N0}" +
+            (result.ColumnsAdded > 0 ? $"; added {result.ColumnsAdded:N0} column(s)" : string.Empty) +
+            $"; {result.Ambiguous:N0} skipped (more than one matching row)");
+    }
+
+    private sealed record UpdateResult(int RowsUpdated, int RowsAdded, int Ambiguous, int ColumnsAdded);
+
+    /// <summary>
+    /// Background work for Update, on an unbound table. On cancellation or error it restores every cell
+    /// it changed, removes rows it added, and removes columns it added.
+    /// </summary>
+    private static UpdateResult UpdateRecords(DataTable target, AdifLog log, IReadOnlyDictionary<string, string> fieldMap,
+        IReadOnlyList<string> newColumns, IReadOnlyList<string> keyNames, IProgress<int> progress, CancellationToken token)
+    {
+        var addedColumns = new List<DataColumn>();
+        var addedRows = new List<DataRow>();
+        var changes = new List<(DataRow Row, string Column, object? Old)>();
+        try
+        {
+            foreach (string name in newColumns)
+                if (!target.Columns.Contains(name)) addedColumns.Add(AddDataColumn(target, name));
+
+            var index = new Dictionary<string, DataRow?>(StringComparer.OrdinalIgnoreCase);
+            foreach (DataRow row in target.Rows)
+            {
+                string? key = ContactKey(row, keyNames);
+                if (key is null) continue;
+                index[key] = index.ContainsKey(key) ? null : row;
+            }
+
+            int updated = 0, added = 0, ambiguous = 0;
+            var reporter = new PercentReporter(progress, log.Records.Count);
+            target.BeginLoadData();
+            try
+            {
+                for (int i = 0; i < log.Records.Count; i++)
+                {
+                    if (i % 1000 == 0)
+                    {
+                        token.ThrowIfCancellationRequested();
+                        reporter.Report(i);
+                    }
+                    AdifRecord record = log.Records[i];
+                    string? key = ContactKey(record["QSO_DATE"], record["TIME_ON"], record["CALL"], record["BAND"], record["MODE"]);
+                    if (key is not null && index.TryGetValue(key, out DataRow? existing) && existing is null)
+                    {
+                        ambiguous++;
+                        continue;
+                    }
+                    if (key is null || !index.TryGetValue(key, out DataRow? row) || row is null)
+                    {
+                        DataRow created = AddRecord(target, record, fieldMap, null);
+                        addedRows.Add(created);
+                        if (key is not null) index[key] = created;
+                        added++;
+                        continue;
+                    }
+
+                    bool changed = false;
+                    foreach (var (name, value) in record.Fields)
+                    {
+                        if (!fieldMap.TryGetValue(name, out string? column) || IsInternal(column) || !target.Columns.Contains(column))
+                            continue;
+                        object old = row[column];
+                        string current = old as string ?? string.Empty;
+                        if (current == value) continue;
+                        changes.Add((row, column, old == DBNull.Value ? null : old));
+                        row[column] = value;
+                        changed = true;
+                    }
+                    if (changed) updated++;
+                }
+            }
+            finally { target.EndLoadData(); }
+
+            return new UpdateResult(updated, added, ambiguous, addedColumns.Count);
+        }
+        catch
+        {
+            foreach (var (row, column, old) in changes)
+                if (row.RowState != DataRowState.Detached) row[column] = old ?? (object)DBNull.Value;
+            foreach (DataRow row in addedRows)
+                if (row.RowState != DataRowState.Detached) target.Rows.Remove(row);
+            foreach (DataColumn column in addedColumns) target.Columns.Remove(column);
+            throw;
+        }
+    }
+
+    /// <summary>Same key Find Duplicates uses. Date, time and call must be present; band and mode may be blank.</summary>
+    private static string? ContactKey(DataRow row, IReadOnlyList<string> keyNames) =>
+        ContactKey(row[keyNames[0]] as string, row[keyNames[1]] as string, row[keyNames[2]] as string,
+            row[keyNames[3]] as string, row[keyNames[4]] as string);
+
+    private static string? ContactKey(string? date, string? time, string? call, string? band, string? mode)
+    {
+        string d = (date ?? string.Empty).Trim();
+        string t = (time ?? string.Empty).Trim();
+        string c = (call ?? string.Empty).Trim();
+        if (d.Length == 0 || t.Length == 0 || c.Length == 0) return null;
+        return string.Join("|", d, NormalizeTime(t), (band ?? string.Empty).Trim(), (mode ?? string.Empty).Trim(), c);
+    }
 
     /// <summary>
     /// Background work for Merge, on an unbound table. On cancellation or error it removes everything it
