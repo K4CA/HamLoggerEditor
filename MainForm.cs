@@ -191,7 +191,7 @@ public sealed class MainForm : Form, ISearchHost
         view.DropDownItems.Add(Item("Auto-size &Columns", Keys.None, AutoSizeColumns));
 
         var columns = new ToolStripMenuItem("&Columns");
-        columns.DropDownItems.Add(Item("&Manage Columns (reorder / rename / delete)...", Keys.None, ManageColumns));
+        columns.DropDownItems.Add(Item("&Manage Columns (add / reorder / rename / delete)...", Keys.None, ManageColumns));
         removeSourceItem.Click += (_, _) => RemoveSourceColumn();
         columns.DropDownItems.Add(removeSourceItem);
         columns.DropDownItems.Add(new ToolStripSeparator());
@@ -217,7 +217,7 @@ public sealed class MainForm : Form, ISearchHost
         bar.Items.Add(new ToolStripSeparator());
         bar.Items.Add(Button("Date/Time ▲", "Sort by QSO_DATE + TIME_ON, oldest first", () => SortByDateTime(true)));
         bar.Items.Add(Button("Date/Time ▼", "Sort by QSO_DATE + TIME_ON, newest first", () => SortByDateTime(false)));
-        bar.Items.Add(Button("Columns...", "Reorder, rename or delete columns", ManageColumns));
+        bar.Items.Add(Button("Columns...", "Add, reorder, rename or delete columns", ManageColumns));
         bar.Items.Add(new ToolStripSeparator());
         bar.Items.Add(Button("Find Duplicates", "Highlight rows with the same QSO_DATE, TIME_ON, BAND, MODE and CALL", FindDuplicates));
         bar.Items.Add(new ToolStripSeparator());
@@ -1418,7 +1418,8 @@ public sealed class MainForm : Form, ISearchHost
         bool same = before.Count == after.Count && before.Zip(after).All(p => p.First.Key == p.Second.Key && p.Second.Key == p.Second.Name);
         if (same) return;
 
-        int deleted = before.Count - after.Count;
+        var kept = new HashSet<string>(after.Where(s => s.Key is not null).Select(s => s.Key!), StringComparer.Ordinal);
+        int deleted = before.Count(s => s.Key is not null && !kept.Contains(s.Key!));
         if (deleted > 0 && table.Rows.Count > 0 && MessageBox.Show(this,
                 $"Delete {deleted} column(s) and their data from all {table.Rows.Count:N0} rows?", "Manage Columns",
                 MessageBoxButtons.OKCancel, MessageBoxIcon.Warning) != DialogResult.OK) return;

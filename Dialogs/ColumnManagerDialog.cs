@@ -13,7 +13,7 @@ public sealed class ColumnSpec(string? key, string name, int width)
         Key is not null && !Key.Equals(Name, StringComparison.Ordinal) ? $"{Name}    (was {Key})" : Name;
 }
 
-/// <summary>Review the columns: reorder (top = leftmost), rename, or delete them. Nothing changes until OK.</summary>
+/// <summary>Review the columns: add, reorder (top = leftmost), rename, or delete them. Nothing changes until OK.</summary>
 public sealed class ColumnManagerDialog : Form
 {
     private readonly ListBox list = new();
@@ -56,8 +56,9 @@ public sealed class ColumnManagerDialog : Form
         }
         MakeButton("Move Left (Up)", 34, (_, _) => MoveSelected(-1));
         MakeButton("Move Right (Down)", 68, (_, _) => MoveSelected(+1));
-        MakeButton("Rename...", 112, (_, _) => RenameSelected());
-        MakeButton("Delete", 146, (_, _) => DeleteSelected());
+        MakeButton("Add...", 112, (_, _) => AddColumn());
+        MakeButton("Rename...", 146, (_, _) => RenameSelected());
+        MakeButton("Delete", 180, (_, _) => DeleteSelected());
 
         summary.SetBounds(12, 420, 250, 30);
         summary.Anchor = AnchorStyles.Bottom | AnchorStyles.Left;
@@ -100,6 +101,15 @@ public sealed class ColumnManagerDialog : Form
         RefreshList(indices.Select(i => i + direction));
     }
 
+    private void AddColumn()
+    {
+        string? name = PromptDialog.Show(this, "Add Column", "ADIF field name for the new column:", string.Empty,
+            value => ValidateName(value, null));
+        if (name is null) return;
+        Columns.Add(new ColumnSpec(null, name.ToUpperInvariant(), 100));
+        RefreshList([Columns.Count - 1]);
+    }
+
     private void RenameSelected()
     {
         if (list.SelectedIndex < 0) return;
@@ -112,7 +122,7 @@ public sealed class ColumnManagerDialog : Form
         RefreshList([index]);
     }
 
-    private string? ValidateName(string value, ColumnSpec self)
+    private string? ValidateName(string value, ColumnSpec? self)
     {
         if (!AdifFile.IsValidFieldName(value))
             return "ADIF field names may contain only letters, digits and underscores, and cannot start with an underscore.";
