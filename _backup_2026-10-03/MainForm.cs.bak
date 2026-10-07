@@ -40,9 +40,6 @@ public sealed class MainForm : Form, ISearchHost
     private readonly ToolStripStatusLabel status = new() { Spring = true, TextAlign = ContentAlignment.MiddleLeft };
     private readonly ContextMenuStrip headerMenu = new();
     private readonly ToolStripMenuItem showDupsOnlyItem = new("Show &Duplicates Only");
-    private readonly ToolStripMenuItem _dupKeyBasicItem = new("Date, Time, Band, Mode, Call");
-    private readonly ToolStripMenuItem _dupKeySubmodeItem = new("Date, Time, Band, Mode, Submode, Call");
-    private readonly ToolStripComboBox _dupKeyComboBox = new() { DropDownStyle = ComboBoxStyle.DropDownList, AutoSize = false, Width = 230 };
     private readonly ToolStripMenuItem removeSourceItem = new("Remove &Source File Column");
     private SearchReplaceDialog? searchDialog;
     private readonly MenuStrip _mainMenuStrip;
@@ -60,10 +57,6 @@ public sealed class MainForm : Form, ISearchHost
     private bool dirty;
     private bool mergedSinceSave;
     private bool suppressEvents;
-    /// <summary>Whether Find/Remove Duplicates include SUBMODE in the match key (the user's selection).</summary>
-    private bool _dupIncludeSubmode;
-    /// <summary>The key option that produced the duplicate highlights now on screen.</summary>
-    private bool _highlightIncludesSubmode;
     private DataGridViewColumn? headerMenuColumn;
 
     public MainForm() : this(null, null) { }
@@ -185,12 +178,6 @@ public sealed class MainForm : Form, ISearchHost
         edit.DropDownItems.Add(showDupsOnlyItem);
         edit.DropDownItems.Add(Item("&Clear Duplicate Highlights", Keys.None, ClearDuplicates));
         edit.DropDownItems.Add(Item("Re&move Duplicate QSOs...", Keys.None, RemoveDuplicates));
-        var dupKeyMenu = new ToolStripMenuItem("Duplicate &Key");
-        _dupKeyBasicItem.Click += (_, _) => SetDuplicateKeyMode(false);
-        _dupKeySubmodeItem.Click += (_, _) => SetDuplicateKeyMode(true);
-        _dupKeyBasicItem.Checked = true;
-        dupKeyMenu.DropDownItems.AddRange(new ToolStripItem[] { _dupKeyBasicItem, _dupKeySubmodeItem });
-        edit.DropDownItems.Add(dupKeyMenu);
         edit.DropDownItems.Add(new ToolStripSeparator());
         edit.DropDownItems.Add(Item("Apply Conditional &Rule...", Keys.Control | Keys.R, ApplyConditionalRule));
         edit.DropDownItems.Add(new ToolStripSeparator());
@@ -235,14 +222,8 @@ public sealed class MainForm : Form, ISearchHost
         bar.Items.Add(Button("Date/Time ▼", "Sort by QSO_DATE + TIME_ON, newest first", () => SortByDateTime(false)));
         bar.Items.Add(Button("Columns...", "Add, reorder, rename or delete columns", ManageColumns));
         bar.Items.Add(new ToolStripSeparator());
-        bar.Items.Add(new ToolStripLabel("Dup key:"));
-        _dupKeyComboBox.Items.AddRange(new object[] { _dupKeyBasicItem.Text!, _dupKeySubmodeItem.Text! });
-        _dupKeyComboBox.SelectedIndex = 0;
-        _dupKeyComboBox.ToolTipText = "Fields that must all match for two rows to count as duplicates";
-        _dupKeyComboBox.SelectedIndexChanged += (_, _) => SetDuplicateKeyMode(_dupKeyComboBox.SelectedIndex == 1);
-        bar.Items.Add(_dupKeyComboBox);
-        bar.Items.Add(Button("Find Duplicates", "Highlight rows whose duplicate-key fields all match (choose the key in the Dup key box)", FindDuplicates));
-        bar.Items.Add(Button("Remove Duplicates", "Delete the duplicate rows found by Find Duplicates, keeping one row per group; fields the kept row is missing are copied from the deleted rows first", RemoveDuplicates));
+        bar.Items.Add(Button("Find Duplicates", "Highlight rows with the same QSO_DATE, TIME_ON, BAND, MODE and CALL", FindDuplicates));
+        bar.Items.Add(Button("Remove Duplicates", "Keep one row per duplicate QSO (the most complete one) and delete the extra rows", RemoveDuplicates));
         bar.Items.Add(new ToolStripSeparator());
         bar.Items.Add(Button("TEST-FT8", "Rows whose COMMENT contains FT8: MODE = FT8", () => RunModeTest("FT8", "FT8", null)));
         bar.Items.Add(Button("TEST-FT4", "Rows whose COMMENT contains FT4: MODE = MFSK, SUBMODE = FT4", () => RunModeTest("FT4", MfskMode, "FT4")));
@@ -1441,34 +1422,11 @@ public sealed class MainForm : Form, ISearchHost
         UpdateStatus("Sort removed");
     }
 
-    private static string DuplicateKeyDescription(bool includeSubmode) =>
-        includeSubmode ? "QSO_DATE, TIME_ON, BAND, MODE, SUBMODE and CALL" : "QSO_DATE, TIME_ON, BAND, MODE and CALL";
-
-    /// <summary>Selects whether SUBMODE is part of the duplicate key; keeps the menu and toolbar in step.</summary>
-    private void SetDuplicateKeyMode(bool includeSubmode)
-    {
-        bool changed = _dupIncludeSubmode != includeSubmode;
-        _dupIncludeSubmode = includeSubmode;
-        _dupKeyBasicItem.Checked = !includeSubmode;
-        _dupKeySubmodeItem.Checked = includeSubmode;
-        int index = includeSubmode ? 1 : 0;
-        if (_dupKeyComboBox.SelectedIndex != index) _dupKeyComboBox.SelectedIndex = index;
-        if (!changed) return;
-
-        // Highlights made with the other key no longer describe the selected key. (Remove Duplicates would
-        // still use the key they were made with, but clearing them avoids surprises.)
-        bool hadHighlights = !_statusProgress.IsBusy && table.Rows.Cast<DataRow>().Any(r => r[DupColumn] is int g && g > 0);
-        if (hadHighlights) ClearDuplicates();
-        UpdateStatus($"Duplicate key: {DuplicateKeyDescription(includeSubmode)}" +
-            (hadHighlights ? " (highlights cleared; run Find Duplicates again)" : string.Empty));
-    }
-
     /// <summary>
-    /// Groups rows that share QSO_DATE, TIME_ON, BAND, MODE and CALL (the same key ContactKey builds), plus
-    /// SUBMODE when <paramref name="includeSubmode"/> is set (a log without a SUBMODE column counts as all blank).
+    /// Groups rows that share QSO_DATE, TIME_ON, BAND, MODE and CALL (the same key ContactKey builds).
     /// Returns only groups with more than one row, in table order; null (after telling the user) if a key column is missing.
     /// </summary>
-    private List<List<DataRow>>? FindDuplicateGroups(bool includeSubmode)
+    private List<List<DataRow>>? FindDuplicateGroups()
     {
         string[] keyNames = ["QSO_DATE", "TIME_ON", "BAND", "MODE", "CALL"];
         var keyColumns = keyNames.Select(FindColumn).ToList();
@@ -1480,7 +1438,6 @@ public sealed class MainForm : Form, ISearchHost
             return null;
         }
         DataColumn date = keyColumns[0]!, time = keyColumns[1]!, band = keyColumns[2]!, mode = keyColumns[3]!, call = keyColumns[4]!;
-        DataColumn? submode = includeSubmode ? FindColumn("SUBMODE") : null;
 
         var groups = new Dictionary<string, List<DataRow>>(StringComparer.OrdinalIgnoreCase);
         foreach (DataRow row in table.Rows)
@@ -1488,29 +1445,16 @@ public sealed class MainForm : Form, ISearchHost
             string? key = ContactKey(row[date] as string, row[time] as string, row[call] as string,
                 row[band] as string, row[mode] as string);
             if (key is null) continue;
-            if (includeSubmode)
-                key += "|" + ((submode is null ? null : row[submode] as string) ?? string.Empty).Trim();
             if (!groups.TryGetValue(key, out var list)) groups[key] = list = [];
             list.Add(row);
         }
         return groups.Values.Where(g => g.Count > 1).ToList();
     }
 
-    /// <summary>The duplicate groups currently highlighted by Find Duplicates (groups still holding 2+ rows).</summary>
-    private List<List<DataRow>> HighlightedDuplicateGroups() =>
-        table.Rows.Cast<DataRow>()
-            .Where(r => r[DupColumn] is int g && g > 0)
-            .GroupBy(r => (int)r[DupColumn])
-            .Where(g => g.Count() > 1)
-            .Select(g => g.ToList())
-            .ToList();
-
     private void FindDuplicates()
     {
         grid.EndEdit();
-        bool includeSubmode = _dupIncludeSubmode;
-        string keyText = DuplicateKeyDescription(includeSubmode);
-        if (FindDuplicateGroups(includeSubmode) is not { } dupGroups) return;
+        if (FindDuplicateGroups() is not { } dupGroups) return;
         int dupRows = dupGroups.Sum(g => g.Count);
         Bulk(() =>
         {
@@ -1522,23 +1466,21 @@ public sealed class MainForm : Form, ISearchHost
                 foreach (DataRow row in g) row[DupColumn] = number;
             }
         });
-        _highlightIncludesSubmode = includeSubmode;
 
         if (dupRows == 0)
         {
             SetDuplicateFilter(false);
             UpdateStatus("No duplicates found");
-            MessageBox.Show(this, $"No duplicate QSOs found (matching {keyText}).", AppTitle,
-                MessageBoxButtons.OK, MessageBoxIcon.Information);
+            MessageBox.Show(this, "No duplicate QSOs found (matching QSO_DATE, TIME_ON, BAND, MODE and CALL).", AppTitle,
+                MessageBoxButtons.OK, MessageBoxIcon.Information);  
             return;
         }
 
         UpdateStatus($"Found {dupRows:N0} duplicate rows in {dupGroups.Count:N0} groups (highlighted)");
         if (MessageBox.Show(this,
-                $"Found {dupRows:N0} rows in {dupGroups.Count:N0} duplicate groups (same {keyText}). " +
+                $"Found {dupRows:N0} rows in {dupGroups.Count:N0} duplicate groups (same QSO_DATE, TIME_ON, BAND, MODE and CALL). " +
                 "They are highlighted; alternating colors separate the groups.\n\n" +
-                "Use Remove Duplicates to delete the extra rows of these groups.\n\n" +
-                "Show only the duplicate rows, sorted by date/time?", "Duplicate QSOs",
+                "Show only the duplicate rows, sorted by date/time?", "Duplicate QSOs", 
                 MessageBoxButtons.YesNo, MessageBoxIcon.Question) == DialogResult.Yes)
         {
             SortByDateTime(true);
@@ -1546,105 +1488,53 @@ public sealed class MainForm : Form, ISearchHost
         }
     }
 
-    /// <summary>What Remove Duplicates will do to one group: the row kept, and the values copied into it.</summary>
-    private sealed record DuplicateMerge(DataRow Keep, List<DataRow> Remove, List<(DataColumn Column, object Value)> Fills, int Conflicts);
-
     /// <summary>
-    /// Picks the row to keep in each group (the one with the most fields filled in; the first such row on a tie)
-    /// and, for every field that row is blank in, the first value found in the rows being removed. Conflicts counts
-    /// fields where a removed row holds a different non-blank value than the kept row (those values are not copied);
-    /// the key columns are skipped there, since they match by definition (e.g. TIME_ON 1200 and 120000).
-    /// </summary>
-    private static List<DuplicateMerge> PlanDuplicateMerges(List<List<DataRow>> groups, List<DataColumn> fields,
-        IReadOnlySet<DataColumn> keyColumns)
-    {
-        var plans = new List<DuplicateMerge>(groups.Count);
-        foreach (var group in groups)
-        {
-            DataRow keep = group.MaxBy(r => fields.Count(c => HasValue(r[c])))!;
-            var remove = group.Where(r => r != keep).ToList();
-            var fills = new List<(DataColumn, object)>();
-            int conflicts = 0;
-            foreach (DataColumn column in fields)
-            {
-                if (HasValue(keep[column]))
-                {
-                    if (keyColumns.Contains(column)) continue;
-                    string kept = Convert.ToString(keep[column], CultureInfo.InvariantCulture)!.Trim();
-                    conflicts += remove.Count(r => HasValue(r[column]) &&
-                        !string.Equals(Convert.ToString(r[column], CultureInfo.InvariantCulture)!.Trim(), kept, StringComparison.OrdinalIgnoreCase));
-                    continue;
-                }
-                DataRow? donor = remove.FirstOrDefault(r => HasValue(r[column]));
-                if (donor is not null) fills.Add((column, donor[column]));
-            }
-            plans.Add(new DuplicateMerge(keep, remove, fills, conflicts));
-        }
-        return plans;
-    }
-
-    /// <summary>
-    /// Deletes the duplicate rows found by Find Duplicates (or, when nothing is highlighted, the duplicates found
-    /// with the selected key), keeping one row per group. Before a row is deleted, every field the kept row is
-    /// blank in is copied over from it, so no data that the kept row lacks is lost.
+    /// Keeps one row per duplicate group and deletes the rest. The kept row is the one with the most fields
+    /// filled in (the first such row on a tie); its blank fields are filled from the rows being removed.
     /// </summary>
     private void RemoveDuplicates()
     {
         grid.EndEdit();
-        List<List<DataRow>> dupGroups = HighlightedDuplicateGroups();
-        bool fromSearch = dupGroups.Count > 0;
-        bool includeSubmode = fromSearch ? _highlightIncludesSubmode : _dupIncludeSubmode;
-        if (!fromSearch)
-        {
-            if (FindDuplicateGroups(includeSubmode) is not { } found) return;
-            dupGroups = found;
-        }
-        string keyText = DuplicateKeyDescription(includeSubmode);
+        if (FindDuplicateGroups() is not { } dupGroups) return;
         int extraRows = dupGroups.Sum(g => g.Count - 1);
         if (extraRows == 0)
         {
             UpdateStatus("No duplicates found");
-            MessageBox.Show(this, $"No duplicate QSOs found (matching {keyText}).", AppTitle,
+            MessageBox.Show(this, "No duplicate QSOs found (matching QSO_DATE, TIME_ON, BAND, MODE and CALL).", AppTitle,
                 MessageBoxButtons.OK, MessageBoxIcon.Information);
             return;
         }
 
-        var fields = FieldColumns().ToList();
-        var keyColumns = new[] { "QSO_DATE", "TIME_ON", "BAND", "MODE", "CALL" }
-            .Concat(includeSubmode ? new[] { "SUBMODE" } : Array.Empty<string>())
-            .Select(FindColumn).OfType<DataColumn>().ToHashSet();
-        var plans = PlanDuplicateMerges(dupGroups, fields, keyColumns);
-        int fillCount = plans.Sum(p => p.Fills.Count);
-        int conflictCount = plans.Sum(p => p.Conflicts);
-
-        string origin = fromSearch ? "highlighted by Find Duplicates" : "found";
-        string conflictNote = conflictCount > 0
-            ? $"\n\n{conflictCount:N0} field value(s) in the rows being removed differ from a value the kept row already has; " +
-              "the kept row's value stays and those values are discarded."
-            : string.Empty;
         if (MessageBox.Show(this,
-                $"{dupGroups.Count:N0} duplicate group(s) {origin} (same {keyText}).\n\n" +
+                $"Found {dupGroups.Count:N0} duplicate groups (same QSO_DATE, TIME_ON, BAND, MODE and CALL).\n\n" +
                 $"Remove {extraRows:N0} extra row(s), keeping one contact per group?\n\n" +
-                "The row with the most fields filled in is kept. Before the other rows are deleted, " +
-                $"{fillCount:N0} field value(s) the kept rows are missing will be copied from them." +
-                conflictNote +
-                "\n\nThis cannot be undone except by reopening the file without saving.",
+                "The row with the most fields filled in is kept, and any of its blank fields are filled in " +
+                "from the rows being removed. This cannot be undone except by reopening the file without saving.",
                 "Remove Duplicate QSOs", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes) return;
 
+        var fields = FieldColumns().ToList();
+        int filled = 0;
         SetDuplicateFilter(false);
         Bulk(() =>
         {
-            foreach (var plan in plans)
+            foreach (var group in dupGroups)
             {
-                // Copy first, delete second.
-                foreach (var (column, value) in plan.Fills) plan.Keep[column] = value;
-                foreach (DataRow row in plan.Remove)
-                    if (row.RowState != DataRowState.Detached) table.Rows.Remove(row);
+                DataRow keep = group.MaxBy(r => fields.Count(c => HasValue(r[c])))!;
+                foreach (DataColumn column in fields)
+                {
+                    if (HasValue(keep[column])) continue;
+                    DataRow? donor = group.FirstOrDefault(r => r != keep && HasValue(r[column]));
+                    if (donor is null) continue;
+                    keep[column] = donor[column];
+                    filled++;
+                }
+                foreach (DataRow row in group)
+                    if (row != keep) table.Rows.Remove(row);
             }
             foreach (DataRow row in table.Rows) row[DupColumn] = 0;
         });
         MarkDirty();
-        string fillNote = fillCount > 0 ? $"; copied {fillCount:N0} missing field(s) into the kept rows" : string.Empty;
+        string fillNote = filled > 0 ? $"; filled {filled:N0} blank field(s) from the removed rows" : string.Empty;
         UpdateStatus($"Removed {extraRows:N0} duplicate row(s) from {dupGroups.Count:N0} groups{fillNote}");
     }
 
@@ -1729,7 +1619,7 @@ public sealed class MainForm : Form, ISearchHost
     }
 
     /// <summary>
-    /// Lets the user build an IF (conditions joined with AND/OR) THEN (set one or more fields)
+    /// Lets the user build an IF (ColumnA op Value1) [AND/OR (ColumnB op Value2)] THEN (ColumnC = Value3)
     /// rule from the grid's current columns, previews how many rows it matches, then applies it.
     /// </summary>
     private void ApplyConditionalRule()
@@ -1756,7 +1646,7 @@ public sealed class MainForm : Form, ISearchHost
                 return;
             }
             if (MessageBox.Show(this,
-                    $"This will set {rule.DescribeActions()} on {previewMatches:N0} matching row(s). Continue?",
+                    $"This will set {rule.ColumnC} = \"{rule.ValueC}\" on {previewMatches:N0} matching row(s). Continue?",
                     "Apply Conditional Rule", MessageBoxButtons.OKCancel, MessageBoxIcon.Question) != DialogResult.OK) return;
 
             (int Matched, int Updated) result = default;
@@ -1766,7 +1656,7 @@ public sealed class MainForm : Form, ISearchHost
             UpdateStatus($"Conditional rule: {result.Matched:N0} row(s) matched, {result.Updated:N0} updated");
             MessageBox.Show(this,
                 $"{result.Matched:N0} row(s) matched the condition.\n{result.Updated:N0} row(s) were updated." +
-                (result.Matched > result.Updated ? $"\n{result.Matched - result.Updated:N0} row(s) already had those values." : string.Empty),
+                (result.Matched > result.Updated ? $"\n{result.Matched - result.Updated:N0} row(s) already had that value." : string.Empty),
                 "Apply Conditional Rule", MessageBoxButtons.OK, MessageBoxIcon.Information);
         }
         catch (Exception ex)

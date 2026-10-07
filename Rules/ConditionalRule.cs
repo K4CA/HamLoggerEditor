@@ -3,32 +3,54 @@ using System.Globalization;
 
 namespace HamLoggerEditor.Rules;
 
-/// <summary>How a condition's value compares to a cell.</summary>
-public enum RuleOperator { Equals, NotEquals, GreaterThan, LessThan }
+/// <summary>How a condition compares a cell to its value.</summary>
+public enum RuleOperator
+{
+    Equals, NotEquals,
+    GreaterThan, GreaterOrEqual, LessThan, LessOrEqual,
+    Contains, NotContains, StartsWith, EndsWith,
+    IsBlank, IsNotBlank
+}
 
-/// <summary>How the first and (optional) second condition combine.</summary>
+/// <summary>How a condition joins the conditions before it.</summary>
 public enum RuleCombinator { And, Or }
 
 /// <summary>
-/// The data type a grid column is treated as, inferred from its current contents. Drives both how
-/// comparisons are evaluated (numeric/date/time by value, everything else as text) and which kind
-/// of value editor the rule dialog shows for that column.
+/// The data type a grid column is treated as, inferred from its current contents. Drives how
+/// comparisons are evaluated (numeric/date/time by value, everything else as text) and how the
+/// rule dialog checks and normalizes the values typed for that column.
 /// </summary>
 public enum ValueKind { Text, Integer, Decimal, Date, Time }
 
+/// <summary>One test: Column Operator Value. <see cref="Combinator"/> is ignored on the first condition.</summary>
+public sealed record RuleCondition(RuleCombinator Combinator, string Column, RuleOperator Operator, string Value);
+
+/// <summary>One result: set Column to Value (an empty Value clears the field).</summary>
+public sealed record RuleAction(string Column, string Value);
+
 /// <summary>
-/// IF (ColumnA OperatorA ValueA) [AND/OR (ColumnB OperatorB ValueB)] THEN (ColumnC = ValueC).
-/// Column names and values are already in the grid's on-screen form (ADIF-formatted where relevant,
+/// IF condition [AND/OR condition ...] THEN set field = value [, field = value ...].
+/// AND binds tighter than OR, as in most query languages: "A OR B AND C" means "A OR (B AND C)".
+/// Column names and values are in the grid's on-screen form (ADIF-formatted where relevant,
 /// e.g. dates as YYYYMMDD); see <see cref="ConditionalRuleEngine"/> for how they are compared/applied.
 /// </summary>
-public sealed record ConditionalRule(
-    string ColumnA, RuleOperator OperatorA, string ValueA,
-    bool HasSecondCondition, RuleCombinator Combinator, string? ColumnB, RuleOperator? OperatorB, string? ValueB,
-    string ColumnC, string ValueC);
+public sealed record ConditionalRule(IReadOnlyList<RuleCondition> Conditions, IReadOnlyList<RuleAction> Actions)
+{
+    /// <summary>Human-readable list of the THEN assignments, e.g. MODE = "MFSK", SUBMODE = "FT4".</summary>
+    public string DescribeActions() =>
+        string.Join(", ", Actions.Select(a => a.Value.Length == 0 ? $"{a.Column} = (blank)" : $"{a.Column} = \"{a.Value}\""));
+}
 
 /// <summary>Infers column data types and evaluates/applies a <see cref="ConditionalRule"/> against a DataTable.</summary>
 public static class ConditionalRuleEngine
 {
+    /// <summary>True for operators that look at the cell only and take no value.</summary>
+    public static bool NeedsValue(RuleOperator op) => op is not (RuleOperator.IsBlank or RuleOperator.IsNotBlank);
+
+    /// <summary>True for operators that always compare as text, whatever the column's type.</summary>
+    public static bool IsTextOperator(RuleOperator op) =>
+        op is RuleOperator.Contains or RuleOperator.NotContains or RuleOperator.StartsWith or RuleOperator.EndsWith;
+
     /// <summary>
     /// Infers a column's data type from its name (DATE/TIME fields) or, failing that, by sampling its
     /// current values: a column is Integer/Decimal only when every non-empty value parses as one.
@@ -56,72 +78,141 @@ public static class ConditionalRuleEngine
         return ValueKind.Text;
     }
 
-    /// <summary>Counts rows the rule's condition matches, without changing anything.</summary>
+    /// <summary>
+    /// Checks a typed value against the column's type and returns it in ADIF form (dates YYYYMMDD,
+    /// times HHMMSS or HHMM as typed, numbers invariant). Returns false with a reason if it does not fit.
+    /// Empty input is accepted as-is (it means "blank").
+    /// </summary>
+    public static bool TryNormalizeValue(string input, ValueKind kind, out string value, out string error)
+    {
+        string s = input.Trim();
+        value = s;
+        error = string.Empty;
+        if (s.Length == 0) return true;
+        switch (kind)
+        {
+            case ValueKind.Integer:
+                if (long.TryParse(s, NumberStyles.Integer, CultureInfo.InvariantCulture, out long l))
+                { value = l.ToString(CultureInfo.InvariantCulture); return true; }
+                error = "a whole number"; return false;
+            case ValueKind.Decimal:
+                if (decimal.TryParse(s, NumberStyles.Float, CultureInfo.InvariantCulture, out decimal d))
+                { value = d.ToString(CultureInfo.InvariantCulture); return true; }
+                error = "a number such as 14.074"; return false;
+            case ValueKind.Date:
+            {
+                string digits = Digits(s);
+                if (digits.Length == 8 && DateTime.TryParseExact(digits, "yyyyMMdd", CultureInfo.InvariantCulture, DateTimeStyles.None, out _))
+                { value = digits; return true; }
+                error = "a date as YYYYMMDD or YYYY-MM-DD"; return false;
+            }
+            case ValueKind.Time:
+            {
+                string digits = Digits(s);
+                bool ok = digits.Length is 4 or 6
+                    && int.Parse(digits[..2], CultureInfo.InvariantCulture) < 24
+                    && int.Parse(digits[2..4], CultureInfo.InvariantCulture) < 60
+                    && (digits.Length == 4 || int.Parse(digits[4..6], CultureInfo.InvariantCulture) < 60);
+                if (ok) { value = digits; return true; }
+                error = "a UTC time as HHMM or HHMMSS"; return false;
+            }
+            default:
+                return true;
+        }
+    }
+
+    /// <summary>Counts rows the rule's conditions match, without changing anything.</summary>
     public static int CountMatches(DataTable table, ConditionalRule rule)
     {
-        ValueKind kindA = InferValueKind(table, rule.ColumnA);
-        ValueKind? kindB = rule.ColumnB is null ? null : InferValueKind(table, rule.ColumnB);
+        var kinds = ConditionKinds(table, rule);
         int count = 0;
         foreach (DataRow row in table.Rows)
-            if (Matches(row, rule, kindA, kindB)) count++;
+            if (Matches(row, rule, kinds)) count++;
         return count;
     }
 
     /// <summary>
-    /// Sets ColumnC = ValueC on every row the condition matches. Returns how many rows matched and how
-    /// many actually changed (a matched row already holding ValueC counts toward Matched but not Updated).
+    /// Applies every THEN assignment to every matching row. Returns how many rows matched and how many
+    /// actually changed (a matched row already holding all the values counts toward Matched only).
     /// </summary>
     public static (int Matched, int Updated) Apply(DataTable table, ConditionalRule rule)
     {
-        ValueKind kindA = InferValueKind(table, rule.ColumnA);
-        ValueKind? kindB = rule.ColumnB is null ? null : InferValueKind(table, rule.ColumnB);
+        var kinds = ConditionKinds(table, rule);
         int matched = 0, updated = 0;
         foreach (DataRow row in table.Rows)
         {
-            if (!Matches(row, rule, kindA, kindB)) continue;
+            if (!Matches(row, rule, kinds)) continue;
             matched++;
-            string current = row[rule.ColumnC] as string ?? string.Empty;
-            if (!string.Equals(current, rule.ValueC, StringComparison.Ordinal))
+            bool changed = false;
+            foreach (RuleAction action in rule.Actions)
             {
-                row[rule.ColumnC] = rule.ValueC;
-                updated++;
+                string current = row[action.Column] as string ?? string.Empty;
+                if (string.Equals(current, action.Value, StringComparison.Ordinal)) continue;
+                row[action.Column] = action.Value.Length == 0 ? DBNull.Value : action.Value;
+                changed = true;
             }
+            if (changed) updated++;
         }
         return (matched, updated);
     }
 
-    private static bool Matches(DataRow row, ConditionalRule rule, ValueKind kindA, ValueKind? kindB)
+    private static ValueKind[] ConditionKinds(DataTable table, ConditionalRule rule) =>
+        rule.Conditions.Select(c => InferValueKind(table, c.Column)).ToArray();
+
+    /// <summary>OR of AND-groups: a new group starts at every condition joined with OR.</summary>
+    private static bool Matches(DataRow row, ConditionalRule rule, ValueKind[] kinds)
     {
-        bool condA = Evaluate(row, rule.ColumnA, rule.OperatorA, rule.ValueA, kindA);
-        if (!rule.HasSecondCondition || rule.ColumnB is null || rule.OperatorB is null || rule.ValueB is null || kindB is null)
-            return condA;
-        bool condB = Evaluate(row, rule.ColumnB, rule.OperatorB.Value, rule.ValueB, kindB.Value);
-        return rule.Combinator == RuleCombinator.And ? condA && condB : condA || condB;
+        if (rule.Conditions.Count == 0) return false;
+        bool group = true;
+        for (int i = 0; i < rule.Conditions.Count; i++)
+        {
+            RuleCondition c = rule.Conditions[i];
+            if (i > 0 && c.Combinator == RuleCombinator.Or)
+            {
+                if (group) return true;
+                group = true;
+            }
+            if (group) group = Evaluate(row, c, kinds[i]);
+        }
+        return group;
     }
 
-    private static bool Evaluate(DataRow row, string column, RuleOperator op, string compareValue, ValueKind kind)
+    private static bool Evaluate(DataRow row, RuleCondition c, ValueKind kind)
     {
-        string cell = (row[column] as string ?? string.Empty).Trim();
-        return op switch
+        string cell = (row[c.Column] as string ?? string.Empty).Trim();
+        string v = c.Value;
+        return c.Operator switch
         {
-            RuleOperator.Equals => ValuesEqual(cell, compareValue, kind),
-            RuleOperator.NotEquals => !ValuesEqual(cell, compareValue, kind),
-            RuleOperator.GreaterThan => CompareValues(cell, compareValue, kind) > 0,
-            RuleOperator.LessThan => CompareValues(cell, compareValue, kind) < 0,
+            RuleOperator.Equals => ValuesEqual(cell, v, kind),
+            RuleOperator.NotEquals => !ValuesEqual(cell, v, kind),
+            RuleOperator.GreaterThan => CompareValues(cell, v, kind) > 0,
+            RuleOperator.GreaterOrEqual => CompareValues(cell, v, kind) >= 0,
+            RuleOperator.LessThan => CompareValues(cell, v, kind) < 0,
+            RuleOperator.LessOrEqual => CompareValues(cell, v, kind) <= 0,
+            RuleOperator.Contains => cell.Contains(v, StringComparison.OrdinalIgnoreCase),
+            RuleOperator.NotContains => !cell.Contains(v, StringComparison.OrdinalIgnoreCase),
+            RuleOperator.StartsWith => cell.StartsWith(v, StringComparison.OrdinalIgnoreCase),
+            RuleOperator.EndsWith => cell.EndsWith(v, StringComparison.OrdinalIgnoreCase),
+            RuleOperator.IsBlank => cell.Length == 0,
+            RuleOperator.IsNotBlank => cell.Length > 0,
             _ => false
         };
     }
 
-    private static bool ValuesEqual(string a, string b, ValueKind kind) => kind switch
+    private static bool ValuesEqual(string a, string b, ValueKind kind)
     {
-        ValueKind.Integer => long.TryParse(a, NumberStyles.Integer, CultureInfo.InvariantCulture, out long la)
-            && long.TryParse(b, NumberStyles.Integer, CultureInfo.InvariantCulture, out long lb) && la == lb,
-        ValueKind.Decimal => double.TryParse(a, NumberStyles.Float, CultureInfo.InvariantCulture, out double da)
-            && double.TryParse(b, NumberStyles.Float, CultureInfo.InvariantCulture, out double db) && Math.Abs(da - db) < 1e-9,
-        ValueKind.Date => NormalizeDigits(a, 8) == NormalizeDigits(b, 8),
-        ValueKind.Time => NormalizeDigits(a, 6) == NormalizeDigits(b, 6),
-        _ => string.Equals(a, b, StringComparison.OrdinalIgnoreCase)
-    };
+        if (a.Length == 0 || b.Length == 0) return a.Length == b.Length;
+        return kind switch
+        {
+            ValueKind.Integer => long.TryParse(a, NumberStyles.Integer, CultureInfo.InvariantCulture, out long la)
+                && long.TryParse(b, NumberStyles.Integer, CultureInfo.InvariantCulture, out long lb) && la == lb,
+            ValueKind.Decimal => double.TryParse(a, NumberStyles.Float, CultureInfo.InvariantCulture, out double da)
+                && double.TryParse(b, NumberStyles.Float, CultureInfo.InvariantCulture, out double db) && Math.Abs(da - db) < 1e-9,
+            ValueKind.Date => NormalizeDigits(a, 8) == NormalizeDigits(b, 8),
+            ValueKind.Time => NormalizeDigits(a, 6) == NormalizeDigits(b, 6),
+            _ => string.Equals(a, b, StringComparison.OrdinalIgnoreCase)
+        };
+    }
 
     private static int CompareValues(string a, string b, ValueKind kind) => kind switch
     {
@@ -134,10 +225,12 @@ public static class ConditionalRuleEngine
         _ => string.Compare(a, b, StringComparison.OrdinalIgnoreCase)
     };
 
+    private static string Digits(string value) => new(value.Where(char.IsAsciiDigit).ToArray());
+
     /// <summary>Keeps only ASCII digits and pads/truncates to a fixed width (mirrors MainForm's date/time sort key).</summary>
     private static string NormalizeDigits(string value, int width)
     {
-        string digits = new(value.Where(char.IsAsciiDigit).ToArray());
+        string digits = Digits(value);
         return digits.Length >= width ? digits[..width] : digits.PadRight(width, '0');
     }
 }
